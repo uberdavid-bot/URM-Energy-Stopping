@@ -1,0 +1,28 @@
+# Data (too large for git)
+data/arc1concept-aug-10/
+data/arc1concept-aug-1000/
+data/*.bin
+data/*.pt
+
+# Checkpoints
+checkpoints/
+
+# W&B logs
+wandb/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Outputs
+outputs/
+
+# Environment
+.env
+*.swp
+*.swo

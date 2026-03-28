@@ -18,8 +18,10 @@ import wandb
 import coolname
 import hydra
 import pydantic
-from omegaconf import DictConfig
-from adam_atan2 import AdamATan2
+# from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
+# from adam_atan2 import AdamATan2
+from adam_atan2_pytorch import AdamAtan2 as AdamATan2
 # from adam_atan2_pytorch import MuonAdamAtan2
 from models.muon import Muon
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
@@ -230,7 +232,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
             ),
             AdamATan2(
                 model.parameters(),
-                lr=0,  # Needs to be set by scheduler
+                lr=max(config.lr, 1e-8),  # Needs to be set by scheduler
                 weight_decay=config.weight_decay,
                 betas=(config.beta1, config.beta2),
             ),
@@ -549,6 +551,36 @@ def train_batch(
     (loss_scale * loss).backward()
     train_state.accum_step += 1
 
+    # Debugging for URM_Energy
+    if rank == 0 and train_state.step % 100 == 0:
+        with torch.no_grad():
+            print(f"\nStep {train_state.step}:")
+            if hasattr(train_state.model.model, 'alpha'):
+                print(f"  Alpha: {train_state.model.model.alpha.item():.4f}")
+            if hasattr(train_state.model.model, 'alpha') and train_state.model.model.alpha.grad is not None:
+                print(f"  Alpha grad: {train_state.model.model.alpha.grad.item():.6f}")
+            if 'contrastive_loss' in metrics:
+                print(f"  Contrastive: {metrics['contrastive_loss']:.4f}")
+            if 'true_energy' in metrics:
+                print(f"  True energy: {metrics['true_energy']:.4f}")
+            if 'predicted_energy' in metrics:
+                print(f"  Predicted energy: {metrics['predicted_energy']:.4f}")
+            if 'true_energy' in metrics and 'predicted_energy' in metrics:
+                energy_gap = metrics['predicted_energy'] - metrics['true_energy']
+                print(f"  Energy gap: {energy_gap:.4f}")
+            if 'energy_decrease' in metrics:
+                print(f"  Energy decrease: {metrics['energy_decrease']:.4f}")
+            if 'mcmc_steps' in metrics:
+                print(f"  MCMC steps: {metrics['mcmc_steps'].item():.1f}")
+            if hasattr(train_state.model.model, 'config') and hasattr(train_state.model.model.config, 'energy_threshold'):
+                print(f"  Energy threshold: {train_state.model.model.config.energy_threshold}")
+            if 'preds' in metrics and 'labels' in batch:
+                # Sample accuracy
+                pred_grid = metrics['preds'][0].cpu().numpy()
+                true_grid = batch['labels'][0].cpu().numpy()
+                accuracy = (pred_grid == true_grid).mean()
+                print(f"  Sample accuracy: {accuracy:.2%}")
+
     should_step = train_state.accum_step % accum_steps == 0
     if not should_step:
         return
@@ -580,7 +612,7 @@ def train_batch(
 
     # Reduce metrics
     if len(metrics):
-        assert not any(v.requires_grad for v in metrics.values())
+        assert not any(getattr(v, 'requires_grad', False) for v in metrics.values())
 
         metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
         # Reduce and reconstruct
@@ -759,7 +791,8 @@ def save_code_and_config(config: PretrainConfig, save_dir: str):
     cfg_path = os.path.join(save_dir, "config.yaml")
     json_path = os.path.join(save_dir, "config.json")
 
-    config_dict = json.loads(config.model_dump_json())
+    # Resolve OmegaConf types to plain Python types
+    config_dict = OmegaConf.to_container(OmegaConf.create(config.model_dump()), resolve=True)
 
     try:
         with open(cfg_path, "w", encoding="utf-8") as f:
@@ -774,6 +807,22 @@ def save_code_and_config(config: PretrainConfig, save_dir: str):
                 "# Failed to write config as YAML, wrote config.json instead.\n"
                 f"# Error: {type(e).__name__}: {e}\n"
             )
+
+    # config_dict = json.loads(config.model_dump_json())
+
+    # try:
+    #     with open(cfg_path, "w", encoding="utf-8") as f:
+    #         yaml.safe_dump(config_dict, f, sort_keys=False, allow_unicode=True)
+
+    # except Exception as e:
+    #     with open(json_path, "w", encoding="utf-8") as f:
+    #         json.dump(config_dict, f, ensure_ascii=False, indent=2)
+
+    #     with open(cfg_path, "w", encoding="utf-8") as f:
+    #         f.write(
+    #             "# Failed to write config as YAML, wrote config.json instead.\n"
+    #             f"# Error: {type(e).__name__}: {e}\n"
+    #         )
 
 
 def _get_loop_config(model: nn.Module):
@@ -900,7 +949,8 @@ def launch(hydra_config: DictConfig):
             settings=wandb.Settings(_disable_stats=True),
         )
         wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
-        save_code_and_config(config)
+        # save_code_and_config(config)
+        save_code_and_config(config, config.checkpoint_path)
 
     # Training Loop
     for _iter_id in range(total_iters):

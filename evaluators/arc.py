@@ -1,6 +1,7 @@
 from typing import Dict, Sequence, Optional
 import os
 import json
+import copy
 
 import torch
 import torch.nn.functional as F
@@ -68,37 +69,52 @@ class ARC:
             self._local_preds = {}
     
     def update_batch(self, batch: Dict[str, torch.Tensor], preds: Dict[str, torch.Tensor]):
-        # Collect required outputs to CPU
+        # Collect required outputs to CPU with explicit cloning to avoid inference mode issues
         outputs = {}
         q_values = None
         q_log_probs = None
 
-        for collection in (batch, preds):
-            for k, v in collection.items():
-                if k in self.required_outputs:
-                    if k == "q_halt_logits":
-                        q_values = v.to(torch.float64).sigmoid().cpu()
-                        q_log_probs = F.logsigmoid(v.to(torch.float64)).cpu()
-                    else:
-                        outputs[k] = v.cpu()
+        with torch.no_grad():  # Explicit no_grad context
+            for collection in (batch, preds):
+                for k, v in collection.items():
+                    if k in self.required_outputs:
+                        if k == "q_halt_logits":
+                            # Clone, detach, and move to CPU
+                            v_cpu = v.detach().clone().cpu().to(torch.float64)
+                            q_values = v_cpu.sigmoid()
+                            q_log_probs = F.logsigmoid(v_cpu)
+                        else:
+                            # Clone, detach, and move to CPU
+                            outputs[k] = v.detach().clone().cpu()
 
         assert q_values is not None and q_log_probs is not None
 
         # Remove padding from outputs
         mask = outputs["puzzle_identifiers"] != self.blank_identifier_id
-        outputs = {k: v[mask] for k, v in outputs.items()}
+        outputs = {k: v[mask].clone() for k, v in outputs.items()}
+        q_values_masked = q_values[mask].clone()
+        q_log_probs_masked = q_log_probs[mask].clone()
+
+        # Convert to numpy immediately (numpy arrays don't have inference mode issues)
+        identifier_np = outputs["puzzle_identifiers"].numpy()
+        inputs_np = outputs["inputs"].numpy()
+        preds_np = outputs["preds"].numpy()
+        q_values_np = q_values_masked.numpy()
+        q_log_probs_np = q_log_probs_masked.numpy()
 
         # Get predictions
-        for identifier, input, pred, q, q_log_prob in zip(outputs["puzzle_identifiers"].numpy(), outputs["inputs"].numpy(), outputs["preds"].numpy(), q_values.numpy(), q_log_probs.numpy()):
+        for identifier, input, pred, q, q_log_prob in zip(
+            identifier_np, inputs_np, preds_np, q_values_np, q_log_probs_np
+        ):
             name = self.identifier_map[identifier]
             orig_name, _inverse_fn = inverse_aug(name)
 
             input_hash = grid_hash(_inverse_fn(_crop(input)))
             
             pred = _inverse_fn(_crop(pred))
-            assert np.all((pred >= 0) & (pred <= 9)), f"Puzzle {name}'s prediction out of 0-9 range."  # Sanity check
+            assert np.all((pred >= 0) & (pred <= 9)), f"Puzzle {name}'s prediction out of 0-9 range."
 
-            # Store into local state
+            # Store into local state (all numpy arrays now)
             pred_hash = grid_hash(pred)
 
             self._local_hmap[pred_hash] = pred
@@ -109,9 +125,16 @@ class ARC:
     
     def result(self, save_path: Optional[str], rank: int, world_size: int, group: Optional[torch.distributed.ProcessGroup] = None) -> Optional[Dict[str, float]]:
         # Gather predictions to rank 0 for voting
-        global_hmap_preds = [None for _ in range(world_size)] if rank == 0 else None
-        dist.gather_object((self._local_hmap, self._local_preds), global_hmap_preds, dst=0, group=group)
-        
+        # global_hmap_preds = [None for _ in range(world_size)] if rank == 0 else None
+        # dist.gather_object((self._local_hmap, self._local_preds), global_hmap_preds, dst=0, group=group)
+
+        # if dist.is_initialized():
+        #     global_hmap_preds = [None for _ in range(world_size)] if rank == 0 else None
+        #     dist.gather_object((copy.deepcopy(self._local_hmap), copy.deepcopy(self._local_preds)), global_hmap_preds, dst=0, group=group)
+        # else:
+        # Single-GPU mode: use local data directly
+        global_hmap_preds = [(self._local_hmap, self._local_preds)]
+
         # Rank 0 logic
         if rank != 0:
             return

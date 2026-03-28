@@ -1,0 +1,34 @@
+name: urm.urm_energy@URM_Energy
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+
+loops: 16
+# num_layers: 8
+num_layers: 4
+hidden_size: 512
+num_heads: 8
+expansion: 4
+
+H_cycles: 4
+L_cycles: 3
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+# Energy-specific
+energy_threshold: 0.1
+langevin_noise_std: 0.01
+replay_buffer_size: 1000
+random_steps_min: 5
+random_steps_max: 50
+
+# Enable timing profile output during training for debugging
+profile: false
+
+# eval_interval: 1000
+# checkpoint_every_eval: True
+# checkpoint_path: /volume/ylchen/code/loop_arcagi/checkpoints/v22_energy_debug
+
+ema: True
+ema_rate: 0.999

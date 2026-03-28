@@ -1,16 +1,16 @@
-run_name="URM-arcagi1-010226-re0"
+run_name="URM-energy-arcagi1-010426-re0"
 checkpoint_path="checkpoints/${run_name}" 
 mkdir -p $checkpoint_path
 
 torchrun --nproc-per-node 1 pretrain.py \
-data_path=data/arc1concept-aug-1000 \
-arch=urm arch.loops=16 arch.H_cycles=2 arch.L_cycles=6 arch.num_layers=4 \
+data_path=data/arc1concept-aug-10 \
+arch=urm_energy \
 epochs=200000 \
-eval_interval=500 \
+eval_interval=50 \
 puzzle_emb_lr=1e-2 \
 lr=1e-4 \
 weight_decay=0.1 \
-global_batch_size=35 \
+global_batch_size=12 \
 +run_name=$run_name \
 +checkpoint_path=$checkpoint_path \
 +ema=True

@@ -1,89 +1,111 @@
-# Universal Reasoning Model
+# URM-Energy: Energy-Based Stopping for Universal Reasoning Models on ARC-AGI
 
-[![paper](https://img.shields.io/badge/paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2512.14693)
+Fork of the [Universal Reasoning Model (URM)](https://github.com/UbiquantAI/URM) extended with an energy-based transformer (EBT) stopping mechanism as an alternative to Adaptive Computation Time (ACT).
 
-Universal transformers (UTs) have been widely used for complex reasoning tasks such as ARC-AGI and Sudoku, yet the specific sources of their performance gains remain underexplored. In this work, we systematically analyze UTs variants and show that improvements on ARC-AGI primarily arise from the recurrent inductive bias and strong nonlinear components of Transformer, rather than from elaborate architectural designs. Motivated by this finding, we propose the Universal Reasoning Model (URM), which enhances the UT with short convolution and truncated backpropagation. Our approach substantially improves reasoning performance, achieving state-of-the-art 53.8% pass@1 on ARC-AGI 1 and 16.0% pass@1 on ARC-AGI 2.
+## Motivation
 
-## ⚠️ For Question Regarding Sudoku Score
-The reported score of 87.4% in the TRM paper is obtained using an MLP model, which we believe it is completely different from the TRM architecture in ARC-AGI task. Therefore, **_for fair comparison_**, when reproducing the results, we unified the architectures for ARC-AGI 1, ARC-AGI 2, and Sudoku to be exactly the same, which means **the architecture used to reproduce Sudoku is the same TRM architecture used to run ARC-AGI**.
+The URM paper ([arXiv:2512.14693](https://arxiv.org/abs/2512.14693)) showed that recurrent inductive bias and strong nonlinearity are the key ingredients for reasoning on ARC-AGI, achieving 53.8% pass@1 on ARC-AGI 1. URM uses ACT (a learned halting probability) to decide when to stop iterating its recurrent computation.
 
-Reproducing the correct TRM Sudoku score:
-```bash
-git clone https://github.com/SamsungSAILMontreal/TinyRecursiveModels
-cd TinyRecursiveModels
-python dataset/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1000  --subsample-size 1000 --num-aug 1000
+This project explores replacing ACT with an **energy-based stopping criterion**, inspired by [Energy-Based Transformers (Hoover et al., 2024)](https://arxiv.org/abs/2410.09197). Instead of learning a binary "should I stop?" signal, we learn an energy function E(input, output) that scores prediction quality. Iteration stops when energy converges. This provides:
 
-run_name="pretrain_att_sudoku"
-python pretrain.py \
-arch=trm \
-data_paths="[data/sudoku-extreme-1k-aug-1000]" \
-evaluators="[]" \
-epochs=50000 eval_interval=5000 \
-lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
-arch.L_layers=2 \
-arch.H_cycles=3 arch.L_cycles=6 \
-+run_name=${run_name} ema=True
+- **Principled stopping**: energy convergence rather than a learned halting head
+- **Iterative refinement via MCMC**: gradient descent in output embedding space
+- **Built-in verification**: energy score as a confidence measure
+
+## What's Implemented
+
+### New files
+- `models/urm/urm_energy.py` — Energy-based URM model with joint energy function E(input, output), MCMC refinement loop with learnable step size (alpha), and Langevin dynamics noise
+- `models/replay_buffer.py` — Replay buffer for diverse MCMC training trajectories
+- `config/arch/urm_energy.yaml` — Hydra config for energy model hyperparameters
+- `scripts/URM_energy_arcagi1.sh` — Launch script for energy experiments
+
+### Modified files
+- `models/losses.py` — Added contrastive energy loss (margin-based, pushes E(input, correct) < E(input, predicted))
+- `evaluators/arc.py` — Fixed InferenceMode compatibility for single-GPU evaluation
+- `pretrain.py` — Integrated energy model forward pass, MCMC loop, and energy metric logging
+
+## Architecture
+```
+Standard URM:  input → [shared layer × T iterations] → ACT halt? → output
+URM-Energy:    input → [shared layer × T iterations] → energy E(input, output)
+                                                      → MCMC refinement via ∇E
+                                                      → stop when ΔE < threshold
 ```
 
-Results:
+The energy function processes concatenated (input, predicted_output) embeddings through the transformer layers, pools, and projects to a scalar energy. Lower energy = better prediction. During inference, predicted embeddings are iteratively refined by descending the energy gradient.
 
-<img width="400" height="250" alt="image" src="https://github.com/user-attachments/assets/c0699d98-64d1-4f41-9c8f-818f924ad77b" />
+## Experiments
 
+Trained on ARC-AGI-1 with 10×10 downscaled grids on a single RTX 3090 (24GB).
 
-## Installation
+| Run | Config | Notes |
+|-----|--------|-------|
+| URM baseline | `arch=urm`, batch=32, 10×10 grids | Converged quickly, severe overfitting (train acc ~20-30%, val ~0.6% pass@1) |
+| Energy v0 | `arch=urm_energy`, batch=12, 10×10 | Initial energy collapse — energy head output constant for all inputs |
+| Energy v1 (+ contrastive loss) | Added margin-based contrastive loss | Fixed collapse: energy function learned to separate correct vs incorrect outputs |
+| Energy v2 (tuning) | Removed ACT q_halt_loss, energy-only stopping | MCMC taking only 1-2 steps; needs minimum step count and threshold tuning |
+
+### Key findings
+- **Contrastive loss is essential**: Without it, the energy head collapses to a constant. The margin-based contrastive loss (E_true < E_predicted - margin) creates the energy separation needed for MCMC to have useful gradients.
+- **Model capacity mismatch**: The full URM architecture is heavily overparameterized for 10×10 grids, causing severe overfitting. Right-sizing the model (smaller hidden dim, fewer layers) or using full 30×30 grids is needed.
+- **MCMC step count matters**: With a low energy threshold, MCMC converges in 1-2 steps before the energy landscape is well-shaped. Forcing a minimum number of steps (8+) is needed to give refinement room to work.
+
+## Reproduction
+
+### Setup
 ```bash
+conda create -n urm python=3.10
+conda activate urm
 pip install -r requirements.txt
+wandb login  # optional, for experiment tracking
 ```
 
-## Login Wandb
+### Data preparation
 ```bash
-wandb login YOUR_API_KEY
-```
-
-## Preparing Data
-```bash
-# ARC-AGI-1
+# Download ARC-AGI data from Kaggle into kaggle/ directory
 python -m data.build_arc_dataset \
   --input-file-prefix kaggle/combined/arc-agi \
-  --output-dir data/arc1concept-aug-1000 \
+  --output-dir data/arc1concept-aug-10 \
   --subsets training evaluation concept \
   --test-set-name evaluation
-
-# ARC-AGI-2
-python -m data.build_arc_dataset \
-  --input-file-prefix kaggle/combined/arc-agi \
-  --output-dir data/arc2concept-aug-1000 \
-  --subsets training2 evaluation2 concept \
-  --test-set-name evaluation2
-
-# Sudoku
-python data/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1000  --subsample-size 1000 --num-aug 1000
 ```
 
-## Reproducing ARC-AGI 1 Score
+### Training (baseline URM)
 ```bash
-bash scripts/URM_arcagi1.sh
+torchrun --nproc-per-node 1 pretrain.py \
+  data_path=data/arc1concept-aug-10 \
+  arch=urm arch.loops=16 arch.H_cycles=2 arch.L_cycles=6 arch.num_layers=4 \
+  epochs=100 eval_interval=10 global_batch_size=32 \
+  puzzle_emb_lr=1e-2 weight_decay=0.1 +ema=True
 ```
 
-## Reproducing ARC-AGI 2 Score
+### Training (energy-based URM)
 ```bash
-bash scripts/URM_arcagi2.sh
+torchrun --nproc-per-node 1 pretrain.py \
+  data_path=data/arc1concept-aug-10 \
+  arch=urm_energy arch.loops=16 arch.H_cycles=2 arch.L_cycles=6 arch.num_layers=4 \
+  arch.energy_threshold=0.5 arch.langevin_noise_std=0.01 arch.replay_buffer_size=1000 \
+  epochs=200000 eval_interval=1000 global_batch_size=12 \
+  puzzle_emb_lr=1e-2 lr=1e-4 weight_decay=0.1 +ema=True
 ```
 
-## Reproducing Sudoku Score
-```bash
-bash scripts/URM_sudoku.sh
-```
+## Status & Next Steps
 
-### Citation
-```
-@misc{gao2025universalreasoningmodel,
-      title={Universal Reasoning Model}, 
-      author={Zitian Gao and Lynx Chen and Yihao Xiao and He Xing and Ran Tao and Haoming Luo and Joey Zhou and Bryan Dai},
-      year={2025},
-      eprint={2512.14693},
-      archivePrefix={arXiv},
-      primaryClass={cs.AI},
-      url={https://arxiv.org/abs/2512.14693}, 
-}
-```
+This is early-stage research. The energy-based mechanism shows promise (learned energy separation, working MCMC gradients) but needs further work:
+
+- [ ] Right-size model for small grids (hidden_dim 64-128, 2 layers) or scale to 30×30
+- [ ] Force minimum MCMC steps (8+) to allow iterative refinement
+- [ ] Increase data augmentation for small grids to reduce overfitting
+- [ ] Hyperparameter sweep on contrastive loss weight, margin, alpha init
+- [ ] Compare energy stopping vs ACT on matched architectures
+
+## References
+
+- [Universal Reasoning Model (URM)](https://arxiv.org/abs/2512.14693) — Gao et al., 2024
+- [Energy-Based Transformers](https://arxiv.org/abs/2410.09197) — Hoover et al., 2024
+- [ARC-AGI](https://arcprize.org/) — Chollet, 2019
+
+## License
+
+Same as the original URM repository.

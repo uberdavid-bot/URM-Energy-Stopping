@@ -101,7 +101,7 @@
 
 #         return new_carry, lm_loss + 0.5 * (q_halt_loss + q_continue_loss), metrics, detached_outputs, new_carry.halted.all()
 
-from typing import Any, Tuple, Dict, Set, Optional
+from typing import Any, Tuple, Dict, Set, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -228,6 +228,142 @@ class ACTLossHead(nn.Module):
                 returned_outputs[k] = outputs[k].detach()
 
         total_loss = lm_loss + 0.5 * (q_halt_loss + q_continue_loss)
+        if aux_loss is not None:
+            total_loss = total_loss + aux_loss
+
+        return (
+            new_carry,
+            total_loss,
+            metrics,
+            returned_outputs,
+            new_carry.halted.all(),
+        )
+
+
+class EnergyLossHead(nn.Module):
+    def __init__(self, model: nn.Module, loss_type: str):
+        super().__init__()
+        self.model = model
+        self.loss_fn = globals()[loss_type]
+        
+    def initial_carry(self, *args, **kwargs):
+        return self.model.initial_carry(*args, **kwargs)  # type: ignore
+
+    def forward(
+        self,
+        return_keys: Sequence[str],
+        # Model args
+        return_raw_outputs: bool = False,
+        **model_kwargs,
+    ) -> Tuple[Any, torch.Tensor, Dict[str, torch.Tensor], Optional[Dict[str, torch.Tensor]], torch.Tensor]:
+        # Model logits
+        # B x SeqLen x D
+        new_carry, outputs = self.model(**model_kwargs)
+        profile = outputs.get("profile")
+        labels = new_carry.current_data["labels"]
+
+        with torch.no_grad():
+            # Preds
+            outputs["preds"] = torch.argmax(outputs["logits"], dim=-1)
+
+            # Correctness
+            mask = (labels != IGNORE_LABEL_ID)
+            loss_counts = mask.sum(-1)
+            loss_divisor = loss_counts.clamp_min(1).unsqueeze(-1)  # Avoid NaNs in division
+
+            is_correct = mask & (torch.argmax(outputs["logits"], dim=-1) == labels)
+            seq_is_correct = is_correct.sum(-1) == loss_counts
+            
+            # Metrics (halted)
+            valid_metrics = new_carry.halted & (loss_counts > 0)
+            metrics = {
+                "count": valid_metrics.sum(),
+                
+                "accuracy":       torch.where(valid_metrics, (is_correct.to(torch.float32) / loss_divisor).sum(-1), 0).sum(),
+                "exact_accuracy": (valid_metrics & seq_is_correct).sum(),
+
+                # "q_halt_accuracy": (valid_metrics & ((outputs["q_halt_logits"] >= 0) == seq_is_correct)).sum(),
+                "steps":          torch.where(valid_metrics, new_carry.steps, 0).sum(),
+            }
+
+        # EBT-style loss: Reconstruction loss over MCMC trajectory
+        predictions_trajectory = outputs["predictions_trajectory"]
+        energies_trajectory = outputs["energies_trajectory"]
+        
+        # Reconstruction loss on ALL MCMC steps
+        reconstruction_loss = 0
+        for pred_logits in predictions_trajectory:
+            loss = (self.loss_fn(pred_logits, labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
+            reconstruction_loss += loss
+        
+        reconstruction_loss = reconstruction_loss / len(predictions_trajectory)
+        
+        # CONTRASTIVE ENERGY LOSS
+        input_embeddings = self.model.inner._input_embeddings(
+            new_carry.current_data["inputs"], 
+            new_carry.current_data["puzzle_identifiers"]
+        )
+        
+        # Embed true targets
+        true_embeddings = self.model.inner.embed_tokens(labels.clamp(min=0))  # Avoid negative indices
+        true_embeddings = true_embeddings * mask.unsqueeze(-1).float()  # Zero out ignored positions
+        true_embeddings = self.model.inner.embed_scale * true_embeddings
+        
+        # Compute energy of TRUE (input, target) pairs
+        true_energy = self.model.compute_joint_energy(input_embeddings, true_embeddings)
+        
+        # Energy of MODEL's final prediction
+        final_predicted_energy = energies_trajectory[-1]
+        
+        # Contrastive loss: E(predicted) > E(true) + margin
+        margin = 0.5
+        contrastive_loss = F.relu(true_energy - final_predicted_energy + margin).mean()
+        
+        # Q halt loss - commented out since using energy-based stopping
+        # q_halt_loss = F.binary_cross_entropy_with_logits(outputs["q_halt_logits"], seq_is_correct.to(outputs["q_halt_logits"].dtype), reduction="sum")
+        
+        metrics.update({
+            "reconstruction_loss": reconstruction_loss.detach(),
+            # "q_halt_loss": q_halt_loss.detach(),
+            "contrastive_loss": contrastive_loss.detach(),
+            "true_energy": true_energy.mean().detach(),
+            "predicted_energy": final_predicted_energy.mean().detach(),
+            "initial_energy": energies_trajectory[0].mean().detach(),
+            "final_energy": energies_trajectory[-1].mean().detach(),
+            "energy_decrease": (energies_trajectory[0] - energies_trajectory[-1]).mean().detach(),
+            "mcmc_steps": torch.tensor(float(len(energies_trajectory)), device=labels.device).detach(),
+            "alpha": self.model.alpha.detach(),
+        })
+        
+        # Q continue (bootstrapping target loss)
+        q_continue_loss = 0
+        if "target_q_continue" in outputs:
+            q_continue_loss = F.binary_cross_entropy_with_logits(outputs["q_continue_logits"], outputs["target_q_continue"], reduction="sum")
+            metrics["q_continue_loss"] = q_continue_loss.detach()
+
+        aux_loss = outputs.get("moe_aux_loss")
+        if aux_loss is not None:
+            metrics["moe_aux_loss"] = aux_loss.detach()
+
+        router_metrics = outputs.get("router_metrics")
+        if router_metrics is not None:
+            for k, v in router_metrics.items():
+                metrics[f"router/{k}"] = v.detach()
+
+        if profile is not None:
+            for name, duration in profile.items():
+                metrics[f"profile/{name}"] = torch.tensor(duration, device=labels.device)
+
+        # Filter outputs for return
+        returned_outputs: Dict[str, torch.Tensor] = {}
+        if return_raw_outputs:
+            returned_outputs["raw_outputs"] = outputs
+
+        for k in return_keys:
+            if k in outputs:
+                returned_outputs[k] = outputs[k].detach()
+
+        total_loss = reconstruction_loss + 1.0 * contrastive_loss  # + 0.5 * (q_halt_loss + q_continue_loss)
         if aux_loss is not None:
             total_loss = total_loss + aux_loss
 

@@ -73,18 +73,19 @@ class ARC:
         outputs = {}
         q_values = None
         q_log_probs = None
+        energy_values = None
 
         with torch.no_grad():  # Explicit no_grad context
             for collection in (batch, preds):
                 for k, v in collection.items():
                     if k in self.required_outputs:
                         if k == "q_halt_logits":
-                            # Clone, detach, and move to CPU
                             v_cpu = v.detach().clone().cpu().to(torch.float64)
                             q_values = v_cpu.sigmoid()
                             q_log_probs = F.logsigmoid(v_cpu)
+                        elif k == "current_energy":
+                            energy_values = v.detach().clone().cpu().to(torch.float64)
                         else:
-                            # Clone, detach, and move to CPU
                             outputs[k] = v.detach().clone().cpu()
 
         assert q_values is not None and q_log_probs is not None
@@ -94,6 +95,7 @@ class ARC:
         outputs = {k: v[mask].clone() for k, v in outputs.items()}
         q_values_masked = q_values[mask].clone()
         q_log_probs_masked = q_log_probs[mask].clone()
+        energy_values_masked = energy_values[mask].clone() if energy_values is not None else None
 
         # Convert to numpy immediately (numpy arrays don't have inference mode issues)
         identifier_np = outputs["puzzle_identifiers"].numpy()
@@ -101,27 +103,28 @@ class ARC:
         preds_np = outputs["preds"].numpy()
         q_values_np = q_values_masked.numpy()
         q_log_probs_np = q_log_probs_masked.numpy()
+        # Lower energy = better prediction → use -energy as confidence
+        energy_conf_np = -energy_values_masked.numpy() if energy_values_masked is not None else np.zeros_like(q_values_np)
 
         # Get predictions
-        for identifier, input, pred, q, q_log_prob in zip(
-            identifier_np, inputs_np, preds_np, q_values_np, q_log_probs_np
+        for identifier, input, pred, q, q_log_prob, energy_conf in zip(
+            identifier_np, inputs_np, preds_np, q_values_np, q_log_probs_np, energy_conf_np
         ):
             name = self.identifier_map[identifier]
             orig_name, _inverse_fn = inverse_aug(name)
 
             input_hash = grid_hash(_inverse_fn(_crop(input)))
-            
+
             pred = _inverse_fn(_crop(pred))
             assert np.all((pred >= 0) & (pred <= 9)), f"Puzzle {name}'s prediction out of 0-9 range."
 
-            # Store into local state (all numpy arrays now)
             pred_hash = grid_hash(pred)
 
             self._local_hmap[pred_hash] = pred
-            
+
             self._local_preds.setdefault(orig_name, {})
             self._local_preds[orig_name].setdefault(input_hash, [])
-            self._local_preds[orig_name][input_hash].append((pred_hash, float(q), float(q_log_prob)))
+            self._local_preds[orig_name][input_hash].append((pred_hash, float(q), float(q_log_prob), float(energy_conf)))
     
     def result(self, save_path: Optional[str], rank: int, world_size: int, group: Optional[torch.distributed.ProcessGroup] = None) -> Optional[Dict[str, float]]:
         # Gather predictions to rank 0 for voting
@@ -141,12 +144,14 @@ class ARC:
 
         submission = {}
         correct = [0.0 for _ in range(len(self.pass_Ks))]
+        energy_correct = [0.0 for _ in range(len(self.pass_Ks))]
         maj_correct = {size: 0.0 for size in self.maj_sample_sizes}
 
         for name, puzzle in self.test_puzzles.items():
             # Process test examples in this puzzle
             submission[name] = []
             num_test_correct = [0 for _ in range(len(self.pass_Ks))]
+            num_test_correct_energy = [0 for _ in range(len(self.pass_Ks))]
             maj_test_correct = {size: 0 for size in self.maj_sample_sizes}
             for pair in puzzle["test"]:
                 input_hash = grid_hash(arc_grid_to_np(pair["input"]))
@@ -155,11 +160,13 @@ class ARC:
                 p_map = {}
                 pred_samples = []
                 for hmap, preds in global_hmap_preds:  # type: ignore
-                    for h, q, q_log_prob in preds.get(name, {}).get(input_hash, {}):
-                        p_map.setdefault(h, [0, 0.0, -np.inf])
+                    for h, q, q_log_prob, energy_conf in preds.get(name, {}).get(input_hash, {}):
+                        # [count, sum_q, max_q_log_prob, sum_energy_conf]
+                        p_map.setdefault(h, [0, 0.0, -np.inf, 0.0])
                         p_map[h][0] += 1
                         p_map[h][1] += q
                         p_map[h][2] = max(p_map[h][2], q_log_prob)
+                        p_map[h][3] += energy_conf
                         pred_samples.append((h, q_log_prob))
 
                 if not len(p_map):
@@ -167,21 +174,30 @@ class ARC:
                     continue
 
                 for h, stats in p_map.items():
-                    stats[1] /= stats[0]
+                    stats[1] /= stats[0]  # avg q
+                    stats[3] /= stats[0]  # avg energy confidence
 
-                p_map = sorted(p_map.items(), key=lambda kv: kv[1], reverse=True)
+                # Q-based ranking (original)
+                p_map_q = sorted(p_map.items(), key=lambda kv: kv[1], reverse=True)
 
-                # vote for different Ks
                 for i, k in enumerate(self.pass_Ks):
                     ok = False
-                    for h, stats in p_map[:k]:
+                    for h, stats in p_map_q[:k]:
                         ok |= h == label_hash
-                        
                     num_test_correct[i] += ok
 
-                # Query grids
+                # Energy-based ranking (sort by avg energy confidence, descending)
+                p_map_energy = sorted(p_map.items(), key=lambda kv: kv[1][3], reverse=True)
+
+                for i, k in enumerate(self.pass_Ks):
+                    ok = False
+                    for h, stats in p_map_energy[:k]:
+                        ok |= h == label_hash
+                    num_test_correct_energy[i] += ok
+
+                # Query grids (use energy ranking for submission)
                 pred_grids = []
-                for h, stats in p_map[:self.submission_K]:
+                for h, stats in p_map_energy[:self.submission_K]:
                     for hmap, preds in global_hmap_preds:  # type: ignore
                         if h in hmap:
                             pred_grids.append(hmap[h])
@@ -213,6 +229,7 @@ class ARC:
             # Total correctness
             for i in range(len(self.pass_Ks)):
                 correct[i] += num_test_correct[i] / len(puzzle["test"])
+                energy_correct[i] += num_test_correct_energy[i] / len(puzzle["test"])
             for sample_size in self.maj_sample_sizes:
                 maj_correct[sample_size] += maj_test_correct[sample_size] / len(puzzle["test"])
 
@@ -223,5 +240,6 @@ class ARC:
 
         # Final result
         result = {f"{self.__class__.__name__}/pass@{k}": correct[i] / len(self.test_puzzles) for i, k in enumerate(self.pass_Ks)}
+        result.update({f"{self.__class__.__name__}/energy_pass@{k}": energy_correct[i] / len(self.test_puzzles) for i, k in enumerate(self.pass_Ks)})
         result.update({f"{self.__class__.__name__}/maj@{k}": maj_correct[k] / len(self.test_puzzles) for k in self.maj_sample_sizes})
         return result

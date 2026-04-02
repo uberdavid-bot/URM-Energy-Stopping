@@ -46,9 +46,9 @@ This project explores replacing ACT with an **energy-based stopping criterion**,
 
 ### New files
 - `models/urm/urm_energy.py` — Energy-based URM model with joint energy function E(input, output), MCMC refinement loop with learnable step size (alpha), and Langevin dynamics noise
-- `models/replay_buffer.py` — Replay buffer for diverse MCMC training trajectories
 - `config/arch/urm_energy.yaml` — Hydra config for energy model hyperparameters
 - `scripts/URM_energy_arcagi1.sh` — Launch script for energy experiments
+- `tests/test_mcmc_inference.py` — Tests for inference-time MCMC and alpha step size
 
 ### Modified files
 - `models/losses.py` — Added contrastive energy loss (margin-based, pushes E(input, correct) < E(input, predicted))
@@ -127,6 +127,8 @@ This is early-stage research. The energy-based mechanism shows promise (learned 
 - [x] Fix inference-time MCMC (was producing zero gradients; now uses `torch.enable_grad()`)
 - [x] Replace `torch.inference_mode()` with `torch.no_grad()` in `evaluate()` so MCMC can compute gradients
 - [x] Force minimum MCMC steps (8+) to allow iterative refinement
+- [x] Remove redundant hard-coded 0.1 gradient scaling — alpha now solely controls MCMC step size
+- [x] Remove dead code (commented-out ACTLossHead in losses.py, unused replay_buffer.py)
 - [ ] Right-size model for small grids (hidden_dim 64-128, 2 layers) or scale to 30×30
 - [ ] Increase data augmentation for small grids to reduce overfitting
 - [ ] Hyperparameter sweep on contrastive loss weight, margin, alpha init

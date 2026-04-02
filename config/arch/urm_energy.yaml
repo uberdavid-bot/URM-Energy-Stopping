@@ -17,7 +17,7 @@ puzzle_emb_ndim: ${.hidden_size}
 pos_encodings: rope
 
 # Energy-specific
-energy_threshold: 0.1
+energy_threshold: 0.005
 langevin_noise_std: 0.01
 replay_buffer_size: 1000
 random_steps_min: 5

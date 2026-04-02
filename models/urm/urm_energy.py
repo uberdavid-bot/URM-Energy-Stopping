@@ -39,7 +39,7 @@ class URMConfig(BaseModel):
     H_cycles: int
     forward_dtype: str = "bfloat16"
     # Energy-specific
-    energy_threshold: float = 0.01
+    energy_threshold: float = 0.005
     langevin_noise_std: float = 0.01
     replay_buffer_size: int = 1000
     random_steps_min: int = 5

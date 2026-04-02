@@ -182,7 +182,7 @@ class URM_Energy(nn.Module):
         self.inner = URM_Inner(self.config)
         # Energy-specific components
         self.energy_head = nn.Linear(self.config.hidden_size, 1, dtype=self.inner.forward_dtype)
-        self.alpha = nn.Parameter(torch.tensor(0.1, dtype=torch.float32), requires_grad=False)  # MCMC step size
+        self.alpha = nn.Parameter(torch.tensor(0.01, dtype=torch.float32), requires_grad=False)  # MCMC step size
         self.langevin_noise_std = nn.Parameter(torch.tensor(float(self.config.langevin_noise_std), dtype=torch.float32))
         # Replay buffer removed for now - add later if needed
 

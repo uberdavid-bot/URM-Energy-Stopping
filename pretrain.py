@@ -652,7 +652,7 @@ def evaluate(
 ):
     reduced_metrics = None
 
-    with torch.inference_mode():
+    with torch.no_grad():
         return_keys = set(config.eval_save_outputs)
         for evaluator in evaluators:
             evaluator.begin_eval()

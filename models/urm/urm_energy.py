@@ -282,7 +282,7 @@ class URM_Energy(nn.Module):
         Uses DSM-trained energy gradients to polish URM predictions.
         """
         probs = F.softmax(logits.float(), dim=-1)
-        predicted_emb = (probs @ self.inner.embed_tokens.weight.data.float()).to(
+        predicted_emb = (probs @ self.inner.embed_tokens.embedding_weight.data.float()).to(
             self.inner.forward_dtype
         ).detach().requires_grad_(True)
 

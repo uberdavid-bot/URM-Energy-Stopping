@@ -40,7 +40,7 @@ def _crop(grid: np.ndarray):
 
 
 class ARC:
-    required_outputs = {"inputs", "puzzle_identifiers", "q_halt_logits", "preds"}
+    required_outputs = {"inputs", "puzzle_identifiers", "q_halt_logits", "preds", "current_energy"}
     
     def __init__(self, data_path: str, eval_metadata: PuzzleDatasetMetadata, submission_K: int = 2, pass_Ks: Sequence[int] = (1, 2, 5, 10, 100, 1000), aggregated_voting: bool = True):
         super().__init__()

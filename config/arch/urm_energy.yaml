@@ -18,17 +18,11 @@ pos_encodings: rope
 
 # Energy-specific
 energy_threshold: 0.005
-langevin_noise_std: 0.01
-replay_buffer_size: 1000
-random_steps_min: 5
-random_steps_max: 50
+min_steps: 8
+dsm_noise_scales: [0.1, 0.3, 0.5, 1.0]
 
 # Enable timing profile output during training for debugging
 profile: false
-
-# eval_interval: 1000
-# checkpoint_every_eval: True
-# checkpoint_path: /volume/ylchen/code/loop_arcagi/checkpoints/v22_energy_debug
 
 ema: True
 ema_rate: 0.999

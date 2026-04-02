@@ -1,5 +1,5 @@
-run_name="URM-energy-arcagi1-010426-re0"
-checkpoint_path="checkpoints/${run_name}" 
+run_name="URM-energy-arcagi1-dsm-v1"
+checkpoint_path="checkpoints/${run_name}"
 mkdir -p $checkpoint_path
 
 torchrun --nproc-per-node 1 pretrain.py \
@@ -10,6 +10,7 @@ arch.H_cycles=4 \
 arch.L_cycles=3 \
 arch.num_layers=4 \
 arch.energy_threshold=0.005 \
+arch.min_steps=8 \
 epochs=200000 \
 eval_interval=50 \
 puzzle_emb_lr=1e-2 \

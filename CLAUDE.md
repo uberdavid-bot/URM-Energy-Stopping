@@ -104,12 +104,26 @@ wandb login  # optional, for experiment tracking
 ```
 
 ### Data preparation
+
+30x30 grids (full ARC, 960 tasks):
 ```bash
 python -m data.build_arc_dataset \
   --input-file-prefix kaggle/combined/arc-agi \
-  --output-dir data/arc1concept-aug-10 \
+  --output-dir data/arc1concept-aug-1000 \
   --subsets training evaluation concept \
-  --test-set-name evaluation
+  --test-set-name evaluation \
+  --num-aug 1000
+```
+
+10x10 grids (294/960 tasks, faster iteration):
+```bash
+python -m data.build_arc_dataset \
+  --input-file-prefix kaggle/combined/arc-agi \
+  --output-dir data/arc1concept-aug-1000-size-10 \
+  --subsets training evaluation concept \
+  --test-set-name evaluation \
+  --num-aug 1000 \
+  --max-grid-size 10
 ```
 
 ### Training (baseline URM with ACT)
@@ -151,6 +165,7 @@ conda activate urm && python -m pytest tests/ -v
 - [x] DSM training for energy head gradients (optional, for MCMC refinement)
 - [x] Inference-time MCMC refinement via refine_with_mcmc() (optional, off by default)
 - [x] Configurable loss weights and training modes
+- [x] Configurable grid size via --max-grid-size (10x10 dataset: 294/960 tasks, 1.15M samples)
 - [x] All bugfixes from previous rounds
 
 ### Experimental Plan

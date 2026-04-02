@@ -129,6 +129,9 @@ This is early-stage research. The energy-based mechanism shows promise (learned 
 - [x] Force minimum MCMC steps (8+) to allow iterative refinement
 - [x] Remove redundant hard-coded 0.1 gradient scaling — alpha now solely controls MCMC step size
 - [x] Remove dead code (commented-out ACTLossHead in losses.py, unused replay_buffer.py)
+- [x] Lower alpha default to 0.01 (preserves effective step size after 0.1 scaling removal)
+- [x] Lower energy_threshold to 0.005 (was 0.1, triggered immediately after min_steps)
+- [x] Align training script/README with actual experiment config (H_cycles=4, L_cycles=3)
 - [ ] Right-size model for small grids (hidden_dim 64-128, 2 layers) or scale to 30×30
 - [ ] Increase data augmentation for small grids to reduce overfitting
 - [ ] Hyperparameter sweep on contrastive loss weight, margin, alpha init

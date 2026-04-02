@@ -406,5 +406,33 @@ class TestEnergyConfidenceRanking:
         assert ranked[1][0] == "hash_b"
 
 
+class TestDSMSkippedWhenWeightZero:
+    def test_dsm_skipped_when_weight_zero(self):
+        """With dsm_weight=0, DSM loss should be 0 and training should still work via contrastive."""
+        from models.losses import EnergyLossHead
+
+        config = make_config(dsm_weight=0.0, contrastive_weight=1.0, contrastive_margin=0.5)
+        model = URM_Energy(config).to(DEVICE).train()
+        loss_head = EnergyLossHead(model, "stablemax_cross_entropy").to(DEVICE)
+
+        batch = make_batch(config)
+        with torch.device(DEVICE):
+            carry = loss_head.initial_carry(batch)
+
+        carry, loss, metrics, _, _ = loss_head(
+            return_keys=[], carry=carry, batch=batch
+        )
+
+        assert metrics["dsm_loss"].item() == 0.0, "DSM loss should be exactly 0 when dsm_weight=0"
+        assert metrics["contrastive_loss"].item() >= 0.0, "Contrastive loss should be computed"
+        assert loss.item() > 0, "Total loss should be positive from reconstruction + contrastive"
+
+        loss.backward()
+        # Energy head should still get gradients from contrastive loss
+        assert model.energy_head.weight.grad is not None, (
+            "energy_head should have gradients from contrastive loss even with dsm_weight=0"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

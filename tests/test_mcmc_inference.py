@@ -309,5 +309,102 @@ class TestRotaryEmbeddingLength:
         assert rotary_len == expected_len
 
 
+class TestContrastiveLoss:
+    def test_contrastive_loss_active_when_gap_insufficient(self):
+        """Contrastive loss should be positive when E(true) > E(predicted) - margin."""
+        config = make_config()
+        model = URM_Energy(config).to(DEVICE).train()
+
+        B, S, H = 2, config["seq_len"], config["hidden_size"]
+        dtype = model.inner.forward_dtype
+        input_emb = torch.randn(B, S, H, dtype=dtype, device=DEVICE)
+        output_emb = torch.randn(B, S, H, dtype=dtype, device=DEVICE)
+
+        true_energy = model.compute_joint_energy(input_emb.detach(), output_emb.detach())
+        predicted_energy = model.compute_joint_energy(input_emb.detach(), output_emb.detach())
+
+        margin = 0.5
+        loss = torch.relu(true_energy - predicted_energy + margin).mean()
+
+        # With same embeddings, true_energy == predicted_energy, so loss = relu(0 + 0.5) = 0.5
+        assert loss.item() > 0, "Contrastive loss should be active when margin not satisfied"
+
+    def test_contrastive_loss_zero_when_gap_sufficient(self):
+        """Contrastive loss should be zero when E(true) << E(predicted) by margin."""
+        # Manually construct: true_energy = -10, predicted_energy = 10, margin = 0.5
+        # loss = relu(-10 - 10 + 0.5) = relu(-19.5) = 0
+        true_energy = torch.tensor([-10.0], device=DEVICE)
+        predicted_energy = torch.tensor([10.0], device=DEVICE)
+        margin = 0.5
+        loss = torch.relu(true_energy - predicted_energy + margin).mean()
+        assert loss.item() == 0.0
+
+    def test_contrastive_plus_dsm_backward(self):
+        """Both DSM and contrastive losses should contribute gradients to energy_head."""
+        config = make_config()
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+        _, outputs = model(carry, batch)
+
+        input_emb = model.inner._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
+        labels = batch["labels"]
+        true_emb = model.inner.embed_tokens(labels.clamp(min=0))
+        true_emb = model.inner.embed_scale * true_emb
+
+        # DSM loss
+        dsm_loss_val, _ = dsm_loss(
+            energy_fn=model.compute_joint_energy,
+            clean_embeddings=true_emb.detach(),
+            input_embeddings=input_emb.detach(),
+            noise_scales=[0.3],
+        )
+
+        # Contrastive loss
+        true_energy = model.compute_joint_energy(input_emb.detach(), true_emb.detach())
+        predicted_energy = outputs["current_energy"]
+        contrastive_loss = torch.relu(true_energy - predicted_energy + 0.5).mean()
+
+        total = dsm_loss_val + contrastive_loss
+        total.backward()
+
+        assert model.energy_head.weight.grad is not None
+        assert model.energy_head.weight.grad.abs().sum() > 0
+
+
+class TestEnergyInOutputs:
+    def test_current_energy_in_outputs(self):
+        """current_energy must be in outputs with shape [batch_size]."""
+        config = make_config()
+        model = URM_Energy(config).to(DEVICE).eval()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        with torch.no_grad():
+            _, outputs = model(carry, batch)
+
+        assert "current_energy" in outputs
+        assert outputs["current_energy"].shape == (config["batch_size"],)
+
+
+class TestEnergyConfidenceRanking:
+    def test_sorting_by_negative_energy_ranks_correctly(self):
+        """Lower energy should rank higher when sorted by -energy (confidence)."""
+        # Simulate: prediction A has energy -5 (good), B has energy 3 (bad)
+        predictions = {
+            "hash_a": [1, 0.0, 0.0, 5.0],   # count, q, q_logp, energy_conf=-(-5)=5
+            "hash_b": [1, 0.0, 0.0, -3.0],   # count, q, q_logp, energy_conf=-(3)=-3
+        }
+
+        # Sort by energy confidence (index 3), descending
+        ranked = sorted(predictions.items(), key=lambda kv: kv[1][3], reverse=True)
+
+        # hash_a should be first (higher energy confidence = lower energy = better)
+        assert ranked[0][0] == "hash_a"
+        assert ranked[1][0] == "hash_b"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

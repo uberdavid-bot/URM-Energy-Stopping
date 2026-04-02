@@ -234,7 +234,10 @@ class URM_Energy(nn.Module):
                 create_graph=True
             )[0]
         else:
-            grad = torch.zeros_like(predicted_embeddings)
+            with torch.enable_grad():
+                pred_for_grad = predicted_embeddings.detach().requires_grad_(True)
+                energy = self.compute_joint_energy(input_embeddings, pred_for_grad)
+                grad = torch.autograd.grad(energy.sum(), pred_for_grad)[0]
 
         # Add gradient normalization
         grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)

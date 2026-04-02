@@ -30,74 +30,68 @@ Do not assume a single grep caught everything.
 # Project 
 # URM-Energy: Energy-Based Stopping for Universal Reasoning Models on ARC-AGI
 
-Fork of the [Universal Reasoning Model (URM)](https://github.com/UbiquantAI/URM) extended with an energy-based transformer (EBT) stopping mechanism as an alternative to Adaptive Computation Time (ACT).
+Fork of the [Universal Reasoning Model (URM)](https://github.com/UbiquantAI/URM) extended with an energy-based stopping mechanism as an alternative to Adaptive Computation Time (ACT).
 
 ## Motivation
 
 The URM paper ([arXiv:2512.14693](https://arxiv.org/abs/2512.14693)) showed that recurrent inductive bias and strong nonlinearity are the key ingredients for reasoning on ARC-AGI, achieving 53.8% pass@1 on ARC-AGI 1. URM uses ACT (a learned halting probability) to decide when to stop iterating its recurrent computation.
 
-This project explores replacing ACT with an **energy-based stopping criterion**, inspired by [Energy-Based Transformers (Hoover et al., 2024)](https://arxiv.org/abs/2410.09197). Instead of learning a binary "should I stop?" signal, we learn an energy function E(input, output) that scores prediction quality. Iteration stops when energy converges. This provides:
+This project replaces ACT with an **energy-based stopping criterion**. Instead of learning a binary "should I stop?" signal, we learn an energy function E(input, output) that scores prediction quality. This provides:
 
 - **Principled stopping**: energy convergence rather than a learned halting head
-- **Iterative refinement via MCMC**: gradient descent in output embedding space at inference
-- **Built-in verification**: energy score as a confidence measure
+- **Built-in reranking**: energy score ranks predictions for pass@K (lower energy = more confident)
+- **Optional MCMC refinement**: gradient descent in output embedding space at inference (experimental)
 
 ## What's Implemented
 
 ### New files
-- `models/urm/urm_energy.py` — Energy-based URM model: URM inner recurrence + energy scoring + inference MCMC refinement
-- `models/dsm_loss.py` — Multi-scale Denoising Score Matching loss for training the energy head
-- `config/arch/urm_energy.yaml` — Hydra config for energy model hyperparameters
+- `models/urm/urm_energy.py` — Energy-based URM: inner recurrence + energy scoring + optional MCMC refinement
+- `models/dsm_loss.py` — Multi-scale Denoising Score Matching loss (for training energy gradients, optional)
+- `config/arch/urm_energy.yaml` — Hydra config with two modes: default and MCMC refinement
 - `scripts/URM_energy_arcagi1.sh` — Launch script for energy experiments
-- `tests/test_mcmc_inference.py` — Tests for DSM loss, forward pass, energy halting, MCMC refinement, backward pass
+- `tests/test_mcmc_inference.py` — Tests for losses, forward pass, energy halting, MCMC refinement, evaluator ranking
 
 ### Modified files
-- `models/losses.py` — EnergyLossHead: reconstruction + DSM + contrastive loss
-- `evaluators/arc.py` — Energy-based reranking alongside q-based pass@K metrics
-- `pretrain.py` — Integrated energy model forward pass and loss metric logging
+- `models/losses.py` — EnergyLossHead: reconstruction + contrastive loss (+ optional DSM)
+- `evaluators/arc.py` — Energy-based reranking (`energy_pass@K` alongside q-based `pass@K`)
+- `pretrain.py` — Energy model forward pass and loss metric logging
 
 ## Architecture
 
-### Training
+### Training (default mode)
 ```
 input → [URM inner: shared layer × H_cycles × L_cycles] → logits + hidden states
                                                          → energy E(input, output_hidden)
-Loss = reconstruction(logits, labels) + dsm_weight * DSM(energy_head) + contrastive_weight * contrastive(E)
+Loss = reconstruction(logits, labels) + contrastive_weight * contrastive(E)
 ```
 
-Three losses train different aspects:
+Two losses:
 - **Reconstruction**: standard LM loss on URM output logits — trains the main predictor
-- **DSM**: trains energy gradients to point from corrupted toward clean outputs (for MCMC refinement)
-- **Contrastive**: trains energy values so E(true) < E(predicted) - margin (for stopping and reranking)
+- **Contrastive**: trains energy values so E(true) < E(predicted) - margin — for stopping and reranking
+
+### Training (with MCMC refinement, experimental)
+```
+Loss = reconstruction + contrastive + dsm_weight * DSM(energy_head)
+```
+
+DSM (Denoising Score Matching) trains energy *gradients* to point from corrupted toward clean outputs. This is only needed for MCMC refinement at inference. Enable with `dsm_weight: 1.0`.
 
 ### Inference
 ```
 input → [URM inner × T iterations] → energy E(input, output)
                                     → stop when ΔE < threshold & steps >= min_steps
-                                    → optional: refine_with_mcmc(logits, ∇E)
                                     → rerank predictions by energy (lower = better)
+                                    → optional: refine_with_mcmc(logits, ∇E) if refine_steps > 0
 ```
 
-The outer loop calls forward() repeatedly. Energy convergence across iterations drives halting. Post-hoc MCMC refinement uses the DSM-trained energy gradients to polish predictions. The ARC evaluator reports both `pass@K` (q-based, baseline) and `energy_pass@K` (energy-ranked) for side-by-side comparison.
+The outer loop calls forward() repeatedly. Energy convergence across iterations drives halting. The ARC evaluator reports both `pass@K` (q-based, baseline) and `energy_pass@K` (energy-ranked) for comparison.
 
-### Why DSM instead of MCMC-backprop?
-The old approach trained the energy head by backpropping through sequential MCMC steps (create_graph=True through the chain). This was ~300x slower and blew up memory on a 3090. DSM trains the same gradient signal (energy pointing toward correct outputs) with a single gradient computation per training step.
+## Key Findings
 
-## Experiments
-
-Trained on ARC-AGI-1 with 10×10 downscaled grids on a single RTX 3090 (24GB).
-
-| Run | Config | Notes |
-|-----|--------|-------|
-| URM baseline | `arch=urm`, batch=32, 10×10 grids | Converged quickly, severe overfitting (train acc ~20-30%, val ~0.6% pass@1) |
-| Energy v0 (MCMC) | `arch=urm_energy`, batch=12, 10×10 | Initial energy collapse — energy head output constant for all inputs |
-| Energy v1 (+ contrastive) | Added margin-based contrastive loss | Fixed collapse but MCMC backprop too slow for 3090 |
-| Energy v2 (DSM) | Reconstruction + DSM loss, no MCMC in training | Current architecture — efficient energy head training |
-
-### Key findings
-- **Contrastive loss was a stepping stone**: It proved the energy head can learn separation, but backpropping through MCMC was impractical. DSM achieves the same goal more efficiently.
-- **Model capacity mismatch**: The full URM architecture is heavily overparameterized for 10×10 grids, causing severe overfitting. Right-sizing the model (smaller hidden dim, fewer layers) or using full 30×30 grids is needed.
-- **DSM directly trains useful gradients**: Instead of hoping MCMC backprop teaches the energy landscape, DSM explicitly trains ∇E to point toward correct answers at multiple noise scales.
+- **Contrastive loss trains energy separation**: E(true) vs E(predicted) gap enables both stopping and reranking
+- **DSM trains energy gradients (optional)**: Only needed for MCMC refinement; trains ∇E to point toward correct answers. Single gradient computation (O(1) cost), not O(steps) like MCMC backprop
+- **Model capacity mismatch**: Full URM architecture is overparameterized for 10×10 grids. Right-sizing needed.
+- **Energy reranking is free**: Once trained, energy scoring adds minimal compute but provides pass@K ranking
 
 ## Reproduction
 
@@ -111,7 +105,6 @@ wandb login  # optional, for experiment tracking
 
 ### Data preparation
 ```bash
-# Download ARC-AGI data from Kaggle into kaggle/ directory
 python -m data.build_arc_dataset \
   --input-file-prefix kaggle/combined/arc-agi \
   --output-dir data/arc1concept-aug-10 \
@@ -119,7 +112,7 @@ python -m data.build_arc_dataset \
   --test-set-name evaluation
 ```
 
-### Training (baseline URM)
+### Training (baseline URM with ACT)
 ```bash
 torchrun --nproc-per-node 1 pretrain.py \
   data_path=data/arc1concept-aug-10 \
@@ -128,7 +121,7 @@ torchrun --nproc-per-node 1 pretrain.py \
   puzzle_emb_lr=1e-2 weight_decay=0.1 +ema=True
 ```
 
-### Training (energy-based URM with DSM)
+### Training (energy-based URM, default mode)
 ```bash
 torchrun --nproc-per-node 1 pretrain.py \
   data_path=data/arc1concept-aug-10 \
@@ -136,6 +129,12 @@ torchrun --nproc-per-node 1 pretrain.py \
   arch.energy_threshold=0.005 arch.min_steps=8 \
   epochs=200000 eval_interval=1000 global_batch_size=12 \
   puzzle_emb_lr=1e-2 lr=1e-4 weight_decay=0.1 +ema=True
+```
+
+### Training (with MCMC refinement, experimental)
+```bash
+# Same as above, plus:
+#   arch.dsm_weight=1.0 arch.refine_steps=8 arch.refine_step_size=0.01
 ```
 
 ### Running tests
@@ -147,21 +146,19 @@ conda activate urm && python -m pytest tests/ -v
 
 ### Completed
 - [x] Energy-based stopping with energy convergence across outer loop iterations
-- [x] DSM training for energy head gradients (for MCMC refinement)
-- [x] Contrastive loss for energy value separation (for stopping and reranking)
-- [x] Inference-time MCMC refinement via refine_with_mcmc()
+- [x] Contrastive loss for energy value separation (stopping + reranking)
 - [x] Energy-based reranking in ARC evaluator (energy_pass@K alongside pass@K)
-- [x] Configurable loss weights (dsm_weight, contrastive_weight, contrastive_margin)
-- [x] All bugfixes from previous rounds (inference gradients, threshold, config alignment, etc.)
+- [x] DSM training for energy head gradients (optional, for MCMC refinement)
+- [x] Inference-time MCMC refinement via refine_with_mcmc() (optional, off by default)
+- [x] Configurable loss weights and training modes
+- [x] All bugfixes from previous rounds
 
-### Phase 2: Training & Tuning
-- [ ] Run actual training with DSM + contrastive loss, compare energy_pass@K vs pass@K
-- [ ] Integrate refine_with_mcmc into evaluation pipeline (evaluate with and without refinement)
-- [ ] Tune DSM noise scales for ARC grid embeddings
-- [ ] Tune loss weights (dsm_weight, contrastive_weight, contrastive_margin)
-- [ ] Right-size model for small grids (hidden_dim 64-128, 2 layers) or scale to 30×30
-- [ ] Compare energy stopping vs ACT on matched architectures
-- [ ] Increase data augmentation for small grids to reduce overfitting
+### Experimental Plan
+1. Baseline URM on 3090 — tune grid size (10×10 vs 30×30) and hyperparams
+2. Energy stopping + reranking vs ACT baseline — compare energy_pass@K vs pass@K
+3. Ablation: +N MCMC refinement steps vs +N extra URM passes
+4. Tune contrastive_margin and contrastive_weight
+5. Right-size model for small grids (hidden_dim 64-128, 2 layers) or scale to 30×30
 
 ## References
 

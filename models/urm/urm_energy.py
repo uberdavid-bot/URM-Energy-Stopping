@@ -179,112 +179,41 @@ class URM_Energy(nn.Module):
         super().__init__()
         self.config = URMConfig(**config_dict)
         self.inner = URM_Inner(self.config)
-        # Energy-specific components
         self.energy_head = nn.Linear(self.config.hidden_size, 1, dtype=self.inner.forward_dtype)
-        self.alpha = nn.Parameter(torch.tensor(0.01, dtype=torch.float32), requires_grad=False)  # MCMC step size
-        self.langevin_noise_std = nn.Parameter(torch.tensor(float(self.config.langevin_noise_std), dtype=torch.float32))
-        # Replay buffer removed for now - add later if needed
 
     @property
     def puzzle_emb(self):
         return self.inner.puzzle_emb
 
-    # @torch._dynamo.disable
-    # @torch.compiler.disable
-    def compute_joint_energy(self, input_embeddings: torch.Tensor, predicted_embeddings: torch.Tensor) -> torch.Tensor:
+    def compute_joint_energy(self, input_embeddings: torch.Tensor, output_embeddings: torch.Tensor) -> torch.Tensor:
         """
-        Compute joint energy E(input, predicted_output).
-        For ARC-AGI: input_embeddings and predicted_embeddings are flattened grids.
-        Concatenate, pass through transformer, pool to scalar energy per example.
+        Compute joint energy E(input, output).
+        Concatenates input and output embeddings, passes through transformer layers,
+        pools to scalar energy per example. Lower energy = better prediction.
         """
-        # Ensure embeddings are in the correct dtype
         input_embeddings = input_embeddings.to(self.inner.forward_dtype)
-        predicted_embeddings = predicted_embeddings.to(self.inner.forward_dtype)
-        
-        all_embeddings = torch.cat((input_embeddings, predicted_embeddings), dim=1)  # [batch_size, total_seq_len, hidden_size]
-        
-        # Use the existing rotary_emb from inner (already configured correctly)
+        output_embeddings = output_embeddings.to(self.inner.forward_dtype)
+
+        all_embeddings = torch.cat((input_embeddings, output_embeddings), dim=1)
+
         cos_sin = self.inner.rotary_emb()
-        
+
         hidden_states = all_embeddings
         for layer in self.inner.layers:
             hidden_states = layer(cos_sin=cos_sin, hidden_states=hidden_states)
-        # Pool over ALL positions to get scalar energy per example
-        h_pooled = hidden_states.mean(dim=1)  # [batch_size, hidden_size]
-        energy = self.energy_head(h_pooled)  # [batch_size, 1]
-        return energy.squeeze(-1)  # [batch_size] - scalar per example
 
-    # @torch.compiler.disable
-    def mcmc_update(self, carry: URMCarry, batch: Dict[str, torch.Tensor], training: bool = True) -> Tuple[URMCarry, torch.Tensor]:
-        """
-        Perform one MCMC step: update predicted_embeddings via energy minimization.
-        """
-        input_embeddings = self.inner._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
-        predicted_embeddings = carry.predicted_embeddings.detach().requires_grad_(True)
-
-        energy = self.compute_joint_energy(input_embeddings, predicted_embeddings)
-        total_energy = energy.sum()
-
-        # CRITICAL: create_graph=True during training for second-order gradients
-        if training:
-            grad = torch.autograd.grad(
-                total_energy, 
-                predicted_embeddings, 
-                create_graph=True
-            )[0]
-        else:
-            with torch.enable_grad():
-                pred_for_grad = predicted_embeddings.detach().requires_grad_(True)
-                energy = self.compute_joint_energy(input_embeddings, pred_for_grad)
-                grad = torch.autograd.grad(energy.sum(), pred_for_grad)[0]
-
-        # Normalize gradient to unit vectors (stabilizes MCMC); alpha controls step size
-        grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        grad = grad / grad_norm
-
-        # Langevin dynamics: add noise (only during training)
-        if training:
-            noise = torch.randn_like(predicted_embeddings) * self.langevin_noise_std
-        else:
-            noise = 0  # Scalar 0 broadcasts correctly
-        
-        # alpha = torch.clamp(self.alpha, min=0.0001)
-        alpha = self.alpha.clamp(min=0.0001)
-
-        # Update
-        updated_predicted = predicted_embeddings - alpha * grad + noise
-
-        # Update carry
-        new_carry = replace(carry, predicted_embeddings=updated_predicted.detach())
-
-        return new_carry, energy
-
-    def embeddings_to_logits(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """
-        Convert predicted embeddings back to logits over vocab.
-        embeddings: [batch_size, seq_len, hidden_size]
-        returns: [batch_size, seq_len, vocab_size]
-        """
-        return self.inner.lm_head(embeddings)
+        h_pooled = hidden_states.mean(dim=1)
+        energy = self.energy_head(h_pooled)
+        return energy.squeeze(-1)
 
     def initial_carry(self, batch: Dict[str, torch.Tensor]) -> URMCarry:
         batch_size = batch["inputs"].shape[0]
         base = self.inner.empty_carry(batch_size)
-        # Initialize predicted_embeddings for OUTPUT grid (no puzzle embeddings)
-        output_seq_len = batch["labels"].shape[1]  # Use labels to get output length
-        predicted_embeddings = torch.randn(
-            batch_size, 
-            output_seq_len, 
-            self.config.hidden_size, 
-            dtype=self.inner.forward_dtype,
-            device=batch["inputs"].device
-        )
         return URMCarry(
             current_hidden=base.current_hidden,
             steps=torch.zeros((batch_size,), dtype=torch.int32, device=batch["inputs"].device),
             halted=torch.ones((batch_size,), dtype=torch.bool, device=batch["inputs"].device),
-            current_data={k: v.clone().detach() for k, v in batch.items()},  # Deep copy + detach
-            predicted_embeddings=predicted_embeddings,
+            current_data={k: v.clone().detach() for k, v in batch.items()},
         )
 
     def forward(
@@ -293,6 +222,7 @@ class URM_Energy(nn.Module):
         batch: Dict[str, torch.Tensor],
         compute_target_q=False
     ) -> Tuple[URMCarry, Dict[str, torch.Tensor]]:
+        # 1. Standard carry management
         new_carry = self.inner.reset_carry(carry.halted, carry)
         new_steps = torch.where(carry.halted, 0, carry.steps)
         new_current_data = {
@@ -304,60 +234,65 @@ class URM_Energy(nn.Module):
             for k, v in carry.current_data.items()
         }
 
-        # Track MCMC trajectory for loss
-        energies_trajectory = []
-        predictions_trajectory = []
-        
-        prev_energy = None
-        for step in range(self.config.loops):
-            # MCMC update
-            new_carry, current_energy = self.mcmc_update(
-                new_carry, 
-                new_current_data,
-                training=self.training
-            )
-            energies_trajectory.append(current_energy)
-            
-            # Convert embeddings to logits for this step
-            logits = self.embeddings_to_logits(new_carry.predicted_embeddings)
-            # No need to remove puzzle positions - predicted_embeddings doesn't include them
-            predictions_trajectory.append(logits)
-            
-            # Check convergence
-            if prev_energy is not None:
-                energy_change = torch.abs(current_energy - prev_energy).mean()
-                min_steps = 8  # Force at least 8 MCMC steps
-                if energy_change < self.config.energy_threshold and step >= min_steps:
-                    break
-            prev_energy = current_energy
-            new_steps = new_steps + 1
+        # 2. Run URM inner recurrence (the actual thinking)
+        new_carry_inner, logits, (q_halt_logits, q_continue_logits) = self.inner(new_carry, new_current_data)
 
-        # Energy model uses energy convergence for stopping, not Q-halt.
-        # Zero Q values provided for evaluator compatibility.
-        batch_size = new_current_data["inputs"].shape[0]
-        q_halt_logits = torch.zeros(batch_size, device=new_current_data["inputs"].device)
-        q_continue_logits = torch.zeros(batch_size, device=new_current_data["inputs"].device)
+        # 3. Compute energy on current output for stopping criterion
+        input_embeddings = self.inner._input_embeddings(
+            new_current_data["inputs"], new_current_data["puzzle_identifiers"]
+        )
+        output_hidden = new_carry_inner.current_hidden[:, self.inner.puzzle_emb_len:]
+        current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
 
-        outputs = {
-            "logits": predictions_trajectory[-1],  # Final prediction
-            "predictions_trajectory": predictions_trajectory,  # For loss
-            "energies_trajectory": energies_trajectory,  # For loss
-            "q_halt_logits": q_halt_logits,
-            "q_continue_logits": q_continue_logits,
-            "final_energy": energies_trajectory[-1],
-        }
-
+        # 4. Energy-based halting
         with torch.no_grad():
             new_steps = new_steps + 1
             halted = (new_steps >= self.config.loops)
+            if carry.prev_energy is not None:
+                energy_change = torch.abs(current_energy - carry.prev_energy)
+                converged = energy_change < self.config.energy_threshold
+                halted = halted | (converged & (new_steps >= self.config.min_steps))
+
+        # 5. Outputs
+        # Energy model uses energy convergence for stopping, not Q-halt.
+        # Zero Q values provided for evaluator compatibility.
+        outputs = {
+            "logits": logits,
+            "current_energy": current_energy,
+            "output_hidden": output_hidden,
+            "q_halt_logits": torch.zeros_like(current_energy),
+            "q_continue_logits": torch.zeros_like(current_energy),
+        }
 
         return (
             URMCarry(
-                current_hidden=new_carry.current_hidden,
+                current_hidden=new_carry_inner.current_hidden,
                 steps=new_steps,
                 halted=halted,
                 current_data=new_current_data,
-                predicted_embeddings=new_carry.predicted_embeddings,
+                prev_energy=current_energy.detach(),
             ),
             outputs,
         )
+
+    def refine_with_mcmc(self, logits: torch.Tensor, input_embeddings: torch.Tensor,
+                         steps: int = 8, step_size: float = 0.01) -> torch.Tensor:
+        """
+        Post-hoc MCMC refinement at inference time only.
+        Uses DSM-trained energy gradients to polish URM predictions.
+        """
+        probs = F.softmax(logits.float(), dim=-1)
+        predicted_emb = (probs @ self.inner.embed_tokens.weight.data.float()).to(
+            self.inner.forward_dtype
+        ).detach().requires_grad_(True)
+
+        for _ in range(steps):
+            with torch.enable_grad():
+                energy = self.compute_joint_energy(input_embeddings, predicted_emb)
+                grad = torch.autograd.grad(energy.sum(), predicted_emb)[0]
+                grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                grad = grad / grad_norm
+            predicted_emb = (predicted_emb - step_size * grad).detach().requires_grad_(True)
+
+        refined_logits = self.inner.lm_head(predicted_emb.to(self.inner.forward_dtype))
+        return refined_logits

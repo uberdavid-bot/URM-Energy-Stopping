@@ -16,7 +16,7 @@ class URMCarry:
     steps: Optional[torch.Tensor] = None
     halted: Optional[torch.Tensor] = None
     current_data: Optional[Dict[str, torch.Tensor]] = None
-    predicted_embeddings: Optional[torch.Tensor] = None  # For energy-based updates
+    prev_energy: Optional[torch.Tensor] = None
 
 
 class URMConfig(BaseModel):
@@ -40,10 +40,8 @@ class URMConfig(BaseModel):
     forward_dtype: str = "bfloat16"
     # Energy-specific
     energy_threshold: float = 0.005
-    langevin_noise_std: float = 0.01
-    replay_buffer_size: int = 1000
-    random_steps_min: int = 5
-    random_steps_max: int = 50
+    min_steps: int = 8
+    dsm_noise_scales: List[float] = [0.1, 0.3, 0.5, 1.0]
 
 class URMBlock(nn.Module):
     def __init__(self, config: URMConfig) -> None:

@@ -154,5 +154,39 @@ class TestMCMCInference:
         )
 
 
+class TestAlphaStepSize:
+    def _single_step_update_norm(self, model, carry, batch, alpha_val):
+        """Run one MCMC step with a given alpha and return the embedding update norm."""
+        model.alpha.data.fill_(alpha_val)
+        initial_emb = carry.predicted_embeddings.clone()
+        new_carry, _ = model.mcmc_update(carry, batch, training=True)
+        delta = new_carry.predicted_embeddings - initial_emb
+        return delta.norm().item()
+
+    def test_alpha_controls_step_size(self):
+        """Update norm must scale proportionally with alpha (no hidden hard-coded scaling)."""
+        config = make_config()
+        # Disable Langevin noise so it doesn't obscure the alpha signal
+        config["langevin_noise_std"] = 0.0
+        model = URM_Energy(config)
+        model.train()
+
+        torch.manual_seed(42)
+        batch = make_batch(config)
+        carry = model.initial_carry(batch)
+
+        norm_small = self._single_step_update_norm(model, carry, batch, alpha_val=0.1)
+        norm_large = self._single_step_update_norm(model, carry, batch, alpha_val=0.5)
+
+        # With unit-normalized gradients, update = alpha * unit_grad, so norms
+        # should be proportional to alpha. Allow 20% tolerance for numerical noise.
+        ratio = norm_large / max(norm_small, 1e-12)
+        expected_ratio = 0.5 / 0.1  # = 5.0
+        assert abs(ratio - expected_ratio) / expected_ratio < 0.2, (
+            f"Alpha ratio test failed: norm(alpha=0.5)/norm(alpha=0.1) = {ratio:.3f}, "
+            f"expected ~{expected_ratio:.1f}. Step size is not proportional to alpha."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

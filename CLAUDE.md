@@ -52,9 +52,9 @@ This project explores replacing ACT with an **energy-based stopping criterion**,
 - `tests/test_mcmc_inference.py` — Tests for DSM loss, forward pass, energy halting, MCMC refinement, backward pass
 
 ### Modified files
-- `models/losses.py` — EnergyLossHead: reconstruction loss + DSM loss (replaces old contrastive+MCMC approach)
-- `evaluators/arc.py` — Fixed InferenceMode compatibility for single-GPU evaluation
-- `pretrain.py` — Integrated energy model forward pass and DSM metric logging
+- `models/losses.py` — EnergyLossHead: reconstruction + DSM + contrastive loss
+- `evaluators/arc.py` — Energy-based reranking alongside q-based pass@K metrics
+- `pretrain.py` — Integrated energy model forward pass and loss metric logging
 
 ## Architecture
 
@@ -62,19 +62,23 @@ This project explores replacing ACT with an **energy-based stopping criterion**,
 ```
 input → [URM inner: shared layer × H_cycles × L_cycles] → logits + hidden states
                                                          → energy E(input, output_hidden)
-Loss = reconstruction_loss(logits, labels) + DSM_loss(energy_head)
+Loss = reconstruction(logits, labels) + dsm_weight * DSM(energy_head) + contrastive_weight * contrastive(E)
 ```
 
-The URM inner recurrence produces logits and hidden states. The energy head scores E(input, output). DSM trains the energy head's gradients to point from corrupted toward clean outputs — no MCMC backprop needed (O(1) cost, not O(steps)).
+Three losses train different aspects:
+- **Reconstruction**: standard LM loss on URM output logits — trains the main predictor
+- **DSM**: trains energy gradients to point from corrupted toward clean outputs (for MCMC refinement)
+- **Contrastive**: trains energy values so E(true) < E(predicted) - margin (for stopping and reranking)
 
 ### Inference
 ```
 input → [URM inner × T iterations] → energy E(input, output)
                                     → stop when ΔE < threshold & steps >= min_steps
                                     → optional: refine_with_mcmc(logits, ∇E)
+                                    → rerank predictions by energy (lower = better)
 ```
 
-The outer loop calls forward() repeatedly. Energy convergence across iterations drives halting. Post-hoc MCMC refinement uses the DSM-trained energy gradients to polish predictions.
+The outer loop calls forward() repeatedly. Energy convergence across iterations drives halting. Post-hoc MCMC refinement uses the DSM-trained energy gradients to polish predictions. The ARC evaluator reports both `pass@K` (q-based, baseline) and `energy_pass@K` (energy-ranked) for side-by-side comparison.
 
 ### Why DSM instead of MCMC-backprop?
 The old approach trained the energy head by backpropping through sequential MCMC steps (create_graph=True through the chain). This was ~300x slower and blew up memory on a 3090. DSM trains the same gradient signal (energy pointing toward correct outputs) with a single gradient computation per training step.
@@ -143,14 +147,18 @@ conda activate urm && python -m pytest tests/ -v
 
 ### Completed
 - [x] Energy-based stopping with energy convergence across outer loop iterations
-- [x] DSM training for energy head (replaces contrastive loss + MCMC backprop)
+- [x] DSM training for energy head gradients (for MCMC refinement)
+- [x] Contrastive loss for energy value separation (for stopping and reranking)
 - [x] Inference-time MCMC refinement via refine_with_mcmc()
+- [x] Energy-based reranking in ARC evaluator (energy_pass@K alongside pass@K)
+- [x] Configurable loss weights (dsm_weight, contrastive_weight, contrastive_margin)
 - [x] All bugfixes from previous rounds (inference gradients, threshold, config alignment, etc.)
 
-### Phase 2: Evaluation & Tuning
+### Phase 2: Training & Tuning
+- [ ] Run actual training with DSM + contrastive loss, compare energy_pass@K vs pass@K
 - [ ] Integrate refine_with_mcmc into evaluation pipeline (evaluate with and without refinement)
 - [ ] Tune DSM noise scales for ARC grid embeddings
-- [ ] Tune DSM loss weight relative to reconstruction loss
+- [ ] Tune loss weights (dsm_weight, contrastive_weight, contrastive_margin)
 - [ ] Right-size model for small grids (hidden_dim 64-128, 2 layers) or scale to 30×30
 - [ ] Compare energy stopping vs ACT on matched architectures
 - [ ] Increase data augmentation for small grids to reduce overfitting

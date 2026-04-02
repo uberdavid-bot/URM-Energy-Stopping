@@ -177,5 +177,58 @@ class TestAlphaStepSize:
         )
 
 
+class TestRotaryEmbeddingLength:
+    def test_rotary_buffer_covers_energy_concat(self):
+        """Rotary embedding buffer must be >= 2*seq_len + puzzle_emb_len."""
+        config = make_config()
+        # Enable puzzle embeddings: puzzle_emb_ndim=hidden_size -> puzzle_emb_len=1
+        config["puzzle_emb_ndim"] = config["hidden_size"]
+        model = URM_Energy(config).to(DEVICE)
+
+        seq_len = config["seq_len"]
+        puzzle_emb_len = model.inner.puzzle_emb_len
+        expected_len = 2 * seq_len + puzzle_emb_len
+
+        rotary_len = model.inner.rotary_emb.cos_cached.shape[0]
+        assert rotary_len == expected_len, (
+            f"Rotary buffer length {rotary_len} != expected {expected_len} "
+            f"(2*{seq_len} + {puzzle_emb_len})"
+        )
+
+    def test_energy_at_max_concat_length(self):
+        """compute_joint_energy must work at max concatenation length without index errors."""
+        config = make_config()
+        config["puzzle_emb_ndim"] = config["hidden_size"]
+        model = URM_Energy(config).to(DEVICE).eval()
+
+        seq_len = config["seq_len"]
+        puzzle_emb_len = model.inner.puzzle_emb_len
+        B = config["batch_size"]
+        H = config["hidden_size"]
+        dtype = model.inner.forward_dtype
+
+        # input_embeddings: [B, seq_len + puzzle_emb_len, H]
+        input_emb = torch.randn(B, seq_len + puzzle_emb_len, H, dtype=dtype, device=DEVICE)
+        # predicted_embeddings: [B, seq_len, H] (output grid = same size as input grid)
+        pred_emb = torch.randn(B, seq_len, H, dtype=dtype, device=DEVICE)
+
+        # This should not raise — concat length = 2*seq_len + puzzle_emb_len = rotary buffer size
+        energy = model.compute_joint_energy(input_emb, pred_emb)
+        assert energy.shape == (B,), f"Expected shape ({B},), got {energy.shape}"
+
+    def test_rotary_without_puzzle_emb(self):
+        """Rotary buffer correct when puzzle_emb_ndim=0 (puzzle_emb_len=0)."""
+        config = make_config()  # puzzle_emb_ndim=0 by default
+        model = URM_Energy(config).to(DEVICE)
+
+        seq_len = config["seq_len"]
+        expected_len = 2 * seq_len  # puzzle_emb_len = 0
+
+        rotary_len = model.inner.rotary_emb.cos_cached.shape[0]
+        assert rotary_len == expected_len, (
+            f"Rotary buffer length {rotary_len} != expected {expected_len}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

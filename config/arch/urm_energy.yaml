@@ -16,6 +16,17 @@ L_cycles: 3
 puzzle_emb_ndim: ${.hidden_size}
 pos_encodings: rope
 
+# Training modes:
+#   Default (energy stopping + reranking):
+#     dsm_weight: 0.0, refine_steps: 0
+#     Uses reconstruction + contrastive loss only
+#     Energy function provides stopping criterion and pass@K reranking
+#
+#   With MCMC refinement (experimental):
+#     dsm_weight: 1.0, refine_steps: 8, refine_step_size: 0.01
+#     Adds DSM loss to train energy gradients
+#     MCMC refinement polishes predictions at inference time
+
 # Energy-specific
 energy_threshold: 0.005
 min_steps: 8

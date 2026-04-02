@@ -42,7 +42,7 @@ class URMConfig(BaseModel):
     energy_threshold: float = 0.005
     min_steps: int = 8
     dsm_noise_scales: List[float] = [0.1, 0.3, 0.5, 1.0]
-    dsm_weight: float = 1.0
+    dsm_weight: float = 0.0
     contrastive_weight: float = 1.0
     contrastive_margin: float = 0.5
 

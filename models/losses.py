@@ -152,8 +152,6 @@ class EnergyLossHead(nn.Module):
         return_raw_outputs: bool = False,
         **model_kwargs,
     ) -> Tuple[Any, torch.Tensor, Dict[str, torch.Tensor], Optional[Dict[str, torch.Tensor]], torch.Tensor]:
-        from models.dsm_loss import dsm_loss as dsm_loss_fn
-
         new_carry, outputs = self.model(**model_kwargs)
         profile = outputs.get("profile")
         labels = new_carry.current_data["labels"]
@@ -179,7 +177,7 @@ class EnergyLossHead(nn.Module):
         # Reconstruction loss (standard LM loss on URM output)
         lm_loss = (self.loss_fn(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
 
-        # DSM loss on energy head
+        # Embed inputs and true targets (shared by DSM and contrastive)
         input_embeddings = self.model.inner._input_embeddings(
             new_carry.current_data["inputs"],
             new_carry.current_data["puzzle_identifiers"]
@@ -188,12 +186,19 @@ class EnergyLossHead(nn.Module):
         true_embeddings = true_embeddings * mask.unsqueeze(-1).float()
         true_embeddings = self.model.inner.embed_scale * true_embeddings
 
-        dsm_loss_val, dsm_metrics = dsm_loss_fn(
-            energy_fn=self.model.compute_joint_energy,
-            clean_embeddings=true_embeddings.detach(),
-            input_embeddings=input_embeddings.detach(),
-            noise_scales=self.model.config.dsm_noise_scales,
-        )
+        # DSM loss (only when dsm_weight > 0 — saves compute)
+        dsm_weight = self.model.config.dsm_weight
+        if dsm_weight > 0:
+            from models.dsm_loss import dsm_loss as dsm_loss_fn
+            dsm_loss_val, dsm_metrics = dsm_loss_fn(
+                energy_fn=self.model.compute_joint_energy,
+                clean_embeddings=true_embeddings.detach(),
+                input_embeddings=input_embeddings.detach(),
+                noise_scales=self.model.config.dsm_noise_scales,
+            )
+            metrics.update(dsm_metrics)
+        else:
+            dsm_loss_val = torch.tensor(0.0, device=labels.device)
 
         # Contrastive loss: E(true) should be lower than E(predicted) by margin
         true_energy = self.model.compute_joint_energy(
@@ -212,7 +217,6 @@ class EnergyLossHead(nn.Module):
             "predicted_energy": predicted_energy.mean().detach(),
             "energy_gap": (predicted_energy - true_energy).mean().detach(),
         })
-        metrics.update(dsm_metrics)
 
         if profile is not None:
             for name, duration in profile.items():
@@ -225,7 +229,6 @@ class EnergyLossHead(nn.Module):
             if k in outputs:
                 returned_outputs[k] = outputs[k].detach()
 
-        dsm_weight = self.model.config.dsm_weight
         contrastive_weight = self.model.config.contrastive_weight
         total_loss = lm_loss + dsm_weight * dsm_loss_val + contrastive_weight * contrastive_loss
 

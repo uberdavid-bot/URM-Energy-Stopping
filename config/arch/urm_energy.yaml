@@ -20,7 +20,7 @@ pos_encodings: rope
 energy_threshold: 0.005
 min_steps: 8
 dsm_noise_scales: [0.1, 0.3, 0.5, 1.0]
-dsm_weight: 1.0
+dsm_weight: 0.0
 contrastive_weight: 1.0
 contrastive_margin: 0.5
 

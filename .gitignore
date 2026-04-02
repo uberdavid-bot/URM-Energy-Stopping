@@ -1,6 +1,5 @@
 # Data (too large for git)
-data/arc1concept-aug-10/
-data/arc1concept-aug-1000/
+data/arc1concept-aug-*/
 data/*.bin
 data/*.pt
 

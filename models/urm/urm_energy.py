@@ -334,7 +334,7 @@ class URM_Energy(nn.Module):
             # Check convergence
             if prev_energy is not None:
                 energy_change = torch.abs(current_energy - prev_energy).mean()
-                min_steps = 6  # Force at least 8 MCMC steps
+                min_steps = 8  # Force at least 8 MCMC steps
                 if energy_change < self.config.energy_threshold and step >= min_steps:
                     break
             prev_energy = current_energy

@@ -258,12 +258,6 @@ class URM_Energy(nn.Module):
         # Update carry
         new_carry = replace(carry, predicted_embeddings=updated_predicted.detach())
 
-        # # DON'T detach during training!
-        # if training:
-        #     new_carry = replace(carry, predicted_embeddings=updated_predicted)
-        # else:
-        #     new_carry = replace(carry, predicted_embeddings=updated_predicted.detach())
-    
         return new_carry, energy
 
     def embeddings_to_logits(self, embeddings: torch.Tensor) -> torch.Tensor:

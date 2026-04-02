@@ -559,13 +559,17 @@ def train_batch(
                 print(f"  Reconstruction loss: {metrics['reconstruction_loss']:.4f}")
             if 'dsm_loss' in metrics:
                 print(f"  DSM loss: {metrics['dsm_loss']:.4f}")
-            if 'current_energy' in metrics:
-                print(f"  Current energy: {metrics['current_energy']:.4f}")
+            if 'contrastive_loss' in metrics:
+                print(f"  Contrastive loss: {metrics['contrastive_loss']:.4f}")
+            if 'true_energy' in metrics:
+                print(f"  True energy: {metrics['true_energy']:.4f}")
+            if 'predicted_energy' in metrics:
+                print(f"  Predicted energy: {metrics['predicted_energy']:.4f}")
+            if 'energy_gap' in metrics:
+                print(f"  Energy gap (pred-true): {metrics['energy_gap']:.4f}")
             for k, v in metrics.items():
                 if k.startswith('grad_norm_sigma_'):
                     print(f"  {k}: {v:.4f}")
-            if hasattr(train_state.model.model, 'config') and hasattr(train_state.model.model.config, 'energy_threshold'):
-                print(f"  Energy threshold: {train_state.model.model.config.energy_threshold}")
 
     should_step = train_state.accum_step % accum_steps == 0
     if not should_step:

@@ -339,10 +339,8 @@ class URM_Energy(nn.Module):
             prev_energy = current_energy
             new_steps = new_steps + 1
 
-        # Standard URM forward for Q values - commented out since using energy-based stopping
-        # new_carry_urm, _, (q_halt_logits, q_continue_logits) = self.inner(new_carry, new_current_data)
-
-        # Set dummy Q values since we're using energy-based stopping
+        # Energy model uses energy convergence for stopping, not Q-halt.
+        # Zero Q values provided for evaluator compatibility.
         batch_size = new_current_data["inputs"].shape[0]
         q_halt_logits = torch.zeros(batch_size, device=new_current_data["inputs"].device)
         q_continue_logits = torch.zeros(batch_size, device=new_current_data["inputs"].device)
@@ -359,14 +357,6 @@ class URM_Energy(nn.Module):
         with torch.no_grad():
             new_steps = new_steps + 1
             halted = (new_steps >= self.config.loops)
-
-            # Energy-based halting: already handled in the loop above
-            # No need for Q-halt logic
-            # if self.training and (self.config.max_steps > 1):
-            #     halted = halted | (q_halt_logits > 0)
-            #     halt_exploration_prob = 0.1
-            #     min_halt_steps = (torch.rand_like(q_halt_logits) < halt_exploration_prob) * torch.randint_like(new_steps, low=self.config.random_steps_min, high=self.config.random_steps_max + 1)
-            #     halted = halted & (new_steps >= min_halt_steps)
 
         return (
             URMCarry(

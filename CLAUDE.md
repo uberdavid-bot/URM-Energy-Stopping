@@ -114,8 +114,8 @@ torchrun --nproc-per-node 1 pretrain.py \
 ```bash
 torchrun --nproc-per-node 1 pretrain.py \
   data_path=data/arc1concept-aug-10 \
-  arch=urm_energy arch.loops=16 arch.H_cycles=2 arch.L_cycles=6 arch.num_layers=4 \
-  arch.energy_threshold=0.5 arch.langevin_noise_std=0.01 arch.replay_buffer_size=1000 \
+  arch=urm_energy arch.loops=16 arch.H_cycles=4 arch.L_cycles=3 arch.num_layers=4 \
+  arch.energy_threshold=0.005 arch.langevin_noise_std=0.01 \
   epochs=200000 eval_interval=1000 global_batch_size=12 \
   puzzle_emb_lr=1e-2 lr=1e-4 weight_decay=0.1 +ema=True
 ```

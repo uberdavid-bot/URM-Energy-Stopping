@@ -195,10 +195,22 @@ class EnergyLossHead(nn.Module):
             noise_scales=self.model.config.dsm_noise_scales,
         )
 
+        # Contrastive loss: E(true) should be lower than E(predicted) by margin
+        true_energy = self.model.compute_joint_energy(
+            input_embeddings.detach(), true_embeddings.detach()
+        )
+        predicted_energy = outputs["current_energy"]
+        margin = self.model.config.contrastive_margin
+        contrastive_loss = F.relu(true_energy - predicted_energy + margin).mean()
+
         metrics.update({
             "reconstruction_loss": lm_loss.detach(),
             "dsm_loss": dsm_loss_val.detach(),
+            "contrastive_loss": contrastive_loss.detach(),
             "current_energy": outputs["current_energy"].mean().detach(),
+            "true_energy": true_energy.mean().detach(),
+            "predicted_energy": predicted_energy.mean().detach(),
+            "energy_gap": (predicted_energy - true_energy).mean().detach(),
         })
         metrics.update(dsm_metrics)
 
@@ -213,7 +225,9 @@ class EnergyLossHead(nn.Module):
             if k in outputs:
                 returned_outputs[k] = outputs[k].detach()
 
-        total_loss = lm_loss + 1.0 * dsm_loss_val
+        dsm_weight = self.model.config.dsm_weight
+        contrastive_weight = self.model.config.contrastive_weight
+        total_loss = lm_loss + dsm_weight * dsm_loss_val + contrastive_weight * contrastive_loss
 
         return (
             new_carry,

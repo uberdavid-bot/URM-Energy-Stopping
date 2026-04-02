@@ -555,31 +555,17 @@ def train_batch(
     if rank == 0 and train_state.step % 100 == 0:
         with torch.no_grad():
             print(f"\nStep {train_state.step}:")
-            if hasattr(train_state.model.model, 'alpha'):
-                print(f"  Alpha: {train_state.model.model.alpha.item():.4f}")
-            if hasattr(train_state.model.model, 'alpha') and train_state.model.model.alpha.grad is not None:
-                print(f"  Alpha grad: {train_state.model.model.alpha.grad.item():.6f}")
-            if 'contrastive_loss' in metrics:
-                print(f"  Contrastive: {metrics['contrastive_loss']:.4f}")
-            if 'true_energy' in metrics:
-                print(f"  True energy: {metrics['true_energy']:.4f}")
-            if 'predicted_energy' in metrics:
-                print(f"  Predicted energy: {metrics['predicted_energy']:.4f}")
-            if 'true_energy' in metrics and 'predicted_energy' in metrics:
-                energy_gap = metrics['predicted_energy'] - metrics['true_energy']
-                print(f"  Energy gap: {energy_gap:.4f}")
-            if 'energy_decrease' in metrics:
-                print(f"  Energy decrease: {metrics['energy_decrease']:.4f}")
-            if 'mcmc_steps' in metrics:
-                print(f"  MCMC steps: {metrics['mcmc_steps'].item():.1f}")
+            if 'reconstruction_loss' in metrics:
+                print(f"  Reconstruction loss: {metrics['reconstruction_loss']:.4f}")
+            if 'dsm_loss' in metrics:
+                print(f"  DSM loss: {metrics['dsm_loss']:.4f}")
+            if 'current_energy' in metrics:
+                print(f"  Current energy: {metrics['current_energy']:.4f}")
+            for k, v in metrics.items():
+                if k.startswith('grad_norm_sigma_'):
+                    print(f"  {k}: {v:.4f}")
             if hasattr(train_state.model.model, 'config') and hasattr(train_state.model.model.config, 'energy_threshold'):
                 print(f"  Energy threshold: {train_state.model.model.config.energy_threshold}")
-            if 'preds' in metrics and 'labels' in batch:
-                # Sample accuracy
-                pred_grid = metrics['preds'][0].cpu().numpy()
-                true_grid = batch['labels'][0].cpu().numpy()
-                accuracy = (pred_grid == true_grid).mean()
-                print(f"  Sample accuracy: {accuracy:.2%}")
 
     should_step = train_state.accum_step % accum_steps == 0
     if not should_step:

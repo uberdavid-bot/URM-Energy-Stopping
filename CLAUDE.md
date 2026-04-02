@@ -124,8 +124,10 @@ torchrun --nproc-per-node 1 pretrain.py \
 
 This is early-stage research. The energy-based mechanism shows promise (learned energy separation, working MCMC gradients) but needs further work:
 
+- [x] Fix inference-time MCMC (was producing zero gradients; now uses `torch.enable_grad()`)
+- [x] Replace `torch.inference_mode()` with `torch.no_grad()` in `evaluate()` so MCMC can compute gradients
+- [x] Force minimum MCMC steps (8+) to allow iterative refinement
 - [ ] Right-size model for small grids (hidden_dim 64-128, 2 layers) or scale to 30×30
-- [ ] Force minimum MCMC steps (8+) to allow iterative refinement
 - [ ] Increase data augmentation for small grids to reduce overfitting
 - [ ] Hyperparameter sweep on contrastive loss weight, margin, alpha init
 - [ ] Compare energy stopping vs ACT on matched architectures

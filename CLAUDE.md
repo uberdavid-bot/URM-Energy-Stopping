@@ -134,7 +134,8 @@ This is early-stage research. The energy-based mechanism shows promise (learned 
 - [x] Align training script/README with actual experiment config (H_cycles=4, L_cycles=3)
 - [x] Fix tests to run on real CUDA with flash_attn (no mocks); requires `conda activate urm`
 - [x] Remove commented-out Q-halt code from URM_Energy.forward()
-- [ ] Clean up remaining commented-out detach block in mcmc_update (lines 261-265)
+- [x] Clean up remaining commented-out detach block in mcmc_update
+- [x] Fix rotary embedding length from `3*seq_len` to exact `2*seq_len + puzzle_emb_len`
 - [ ] Right-size model for small grids (hidden_dim 64-128, 2 layers) or scale to 30×30
 - [ ] Increase data augmentation for small grids to reduce overfitting
 - [ ] Hyperparameter sweep on contrastive loss weight, margin, alpha init

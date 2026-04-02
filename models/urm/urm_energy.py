@@ -45,6 +45,8 @@ class URMConfig(BaseModel):
     dsm_weight: float = 0.0
     contrastive_weight: float = 1.0
     contrastive_margin: float = 0.5
+    refine_steps: int = 0
+    refine_step_size: float = 0.01
 
 class URMBlock(nn.Module):
     def __init__(self, config: URMConfig) -> None:

@@ -239,10 +239,9 @@ class URM_Energy(nn.Module):
                 energy = self.compute_joint_energy(input_embeddings, pred_for_grad)
                 grad = torch.autograd.grad(energy.sum(), pred_for_grad)[0]
 
-        # Add gradient normalization
+        # Normalize gradient to unit vectors (stabilizes MCMC); alpha controls step size
         grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        grad = grad / grad_norm  # Normalize to unit vectors
-        grad = grad * 0.1  # Scale to reasonable magnitude
+        grad = grad / grad_norm
 
         # Langevin dynamics: add noise (only during training)
         if training:

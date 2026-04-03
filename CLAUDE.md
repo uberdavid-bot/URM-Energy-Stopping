@@ -48,7 +48,9 @@ This project replaces ACT with an **energy-based stopping criterion**. Instead o
 - `models/urm/urm_energy.py` — Energy-based URM: inner recurrence + energy scoring + optional MCMC refinement
 - `models/dsm_loss.py` — Multi-scale Denoising Score Matching loss (for training energy gradients, optional)
 - `config/arch/urm_energy.yaml` — Hydra config with two modes: default and MCMC refinement
+- `config/arch/urm_small.yaml` — Right-sized baseline URM for 10x10 grids (2 layers, hidden=128, 530K params)
 - `scripts/URM_energy_arcagi1.sh` — Launch script for energy experiments
+- `scripts/baseline_small.sh` — Launch script for baseline URM on 10x10 grids
 - `tests/test_mcmc_inference.py` — Tests for losses, forward pass, energy halting, MCMC refinement, evaluator ranking
 
 ### Modified files
@@ -126,23 +128,16 @@ python -m data.build_arc_dataset \
   --max-grid-size 10
 ```
 
-### Training (baseline URM with ACT)
+### Training (baseline URM on 10x10, right-sized)
 ```bash
-torchrun --nproc-per-node 1 pretrain.py \
-  data_path=data/arc1concept-aug-10 \
-  arch=urm arch.loops=16 arch.H_cycles=2 arch.L_cycles=6 arch.num_layers=4 \
-  epochs=100 eval_interval=10 global_batch_size=32 \
-  puzzle_emb_lr=1e-2 weight_decay=0.1 +ema=True
+bash scripts/baseline_small.sh
+# urm_small: 2 layers, hidden=128, 530K params + 33M puzzle_emb
+# ~38 it/s on RTX 3090, eval_interval=500 epochs
 ```
 
 ### Training (energy-based URM, default mode)
 ```bash
-torchrun --nproc-per-node 1 pretrain.py \
-  data_path=data/arc1concept-aug-10 \
-  arch=urm_energy arch.loops=16 arch.H_cycles=4 arch.L_cycles=3 arch.num_layers=4 \
-  arch.energy_threshold=0.005 arch.min_steps=8 \
-  epochs=200000 eval_interval=1000 global_batch_size=12 \
-  puzzle_emb_lr=1e-2 lr=1e-4 weight_decay=0.1 +ema=True
+bash scripts/URM_energy_arcagi1.sh
 ```
 
 ### Training (with MCMC refinement, experimental)
@@ -167,13 +162,22 @@ conda activate urm && python -m pytest tests/ -v
 - [x] Configurable loss weights and training modes
 - [x] Configurable grid size via --max-grid-size (10x10 dataset: 294/960 tasks, 1.15M samples)
 - [x] All bugfixes from previous rounds
+- [x] Right-sized baseline model (urm_small: 2 layers, hidden=128, 530K params, ~38 it/s on 3090)
 
 ### Experimental Plan
-1. Baseline URM on 3090 — tune grid size (10×10 vs 30×30) and hyperparams
-2. Energy stopping + reranking vs ACT baseline — compare energy_pass@K vs pass@K
-3. Ablation: +N MCMC refinement steps vs +N extra URM passes
+1. **Run baseline URM** on 10x10 (`bash scripts/baseline_small.sh`) — establish ACT pass@K
+2. **Energy stopping + reranking** vs ACT baseline — compare energy_pass@K vs pass@K
+3. **Ablation**: +N MCMC refinement steps vs +N extra URM passes
 4. Tune contrastive_margin and contrastive_weight
-5. Right-size model for small grids (hidden_dim 64-128, 2 layers) or scale to 30×30
+5. Scale to 30×30 grids once 10×10 pipeline validated
+
+### Model configs
+| Config | Layers | Hidden | Heads | Params | Speed (3090) | Data |
+|--------|--------|--------|-------|--------|-------------|------|
+| urm_small | 2 | 128 | 4 | 530K (+33M puzzle_emb) | ~38 it/s | 10x10 |
+| urm | 8 | 512 | 8 | ~40M (+33M puzzle_emb) | ~2 it/s | 30x30 |
+
+Note: `eval_interval` is in *epochs* not steps. Each epoch = ~36K steps at batch_size=32 on the 10x10 dataset.
 
 ## References
 

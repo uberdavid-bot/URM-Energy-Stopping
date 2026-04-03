@@ -16,7 +16,8 @@ from data.common import PuzzleDatasetMetadata
 @njit
 def _crop(grid: np.ndarray):
     """Find maximum-sized rectangle without any EOS token inside. """
-    grid = grid.reshape(30, 30)
+    side = int(np.sqrt(grid.shape[0]))
+    grid = grid.reshape(side, side)
 
     max_area = 0
     max_size = (0, 0)

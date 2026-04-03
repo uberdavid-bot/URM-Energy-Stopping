@@ -163,9 +163,10 @@ conda activate urm && python -m pytest tests/ -v
 - [x] Configurable grid size via --max-grid-size (10x10 dataset: 294/960 tasks, 1.15M samples)
 - [x] All bugfixes from previous rounds
 - [x] Right-sized baseline model (urm_small: 2 layers, hidden=128, 530K params, ~38 it/s on 3090)
+- [x] Fix evaluator _crop() for variable grid sizes (was hardcoded to 30x30)
 
 ### Experimental Plan
-1. **Run baseline URM** on 10x10 (`bash scripts/baseline_small.sh`) — establish ACT pass@K
+1. **Run baseline URM** on 10x10 (`bash scripts/baseline_small.sh`) — establish ACT pass@K — **RUNNING**
 2. **Energy stopping + reranking** vs ACT baseline — compare energy_pass@K vs pass@K
 3. **Ablation**: +N MCMC refinement steps vs +N extra URM passes
 4. Tune contrastive_margin and contrastive_weight

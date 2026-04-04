@@ -132,7 +132,7 @@ python -m data.build_arc_dataset \
 ```bash
 bash scripts/baseline_small.sh
 # urm_small: 2 layers, hidden=128, 530K params + 33M puzzle_emb
-# 50 epochs (~13h on 3090), eval every 5 epochs (10 checkpoints)
+# 700 epochs (~12h on 3090), eval every 50 epochs (~14 eval points)
 ```
 
 ### Training (energy-based URM, default mode)
@@ -178,7 +178,7 @@ conda activate urm && python -m pytest tests/ -v
 | urm_small | 2 | 128 | 4 | 530K (+33M puzzle_emb) | ~38 it/s | 10x10 |
 | urm | 8 | 512 | 8 | ~40M (+33M puzzle_emb) | ~2 it/s | 30x30 |
 
-Note: `eval_interval` is in *epochs* not steps. Each epoch = ~36K steps (~16 min) at batch_size=32 on the 10x10 dataset.
+Note: `eval_interval` is in *epochs* not steps. Each epoch = ~294 puzzle groups (~40 steps, ~1 min) at batch_size=32 on the 10x10 dataset.
 
 ## References
 

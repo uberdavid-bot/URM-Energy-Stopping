@@ -48,8 +48,10 @@ This project replaces ACT with an **energy-based stopping criterion**. Instead o
 - `models/urm/urm_energy.py` — Energy-based URM: inner recurrence + energy scoring + optional MCMC refinement
 - `models/dsm_loss.py` — Multi-scale Denoising Score Matching loss (for training energy gradients, optional)
 - `config/arch/urm_energy.yaml` — Hydra config with two modes: default and MCMC refinement
+- `config/arch/urm_energy_small.yaml` — Energy URM for 10x10 grids (matches urm_small arch, +129 params for energy head)
 - `config/arch/urm_small.yaml` — Right-sized baseline URM for 10x10 grids (2 layers, hidden=128, 530K params)
 - `scripts/URM_energy_arcagi1.sh` — Launch script for energy experiments
+- `scripts/energy_small.sh` — Launch script for energy model on 10x10 grids (direct baseline comparison)
 - `scripts/baseline_small.sh` — Launch script for baseline URM on 10x10 grids
 - `tests/test_mcmc_inference.py` — Tests for losses, forward pass, energy halting, MCMC refinement, evaluator ranking
 
@@ -132,10 +134,17 @@ python -m data.build_arc_dataset \
 ```bash
 bash scripts/baseline_small.sh
 # urm_small: 2 layers, hidden=128, 530K params + 33M puzzle_emb
-# 700 epochs (~12h on 3090), eval every 50 epochs (~14 eval points)
+# 32000 epochs, eval every 2000, batch 512
 ```
 
-### Training (energy-based URM, default mode)
+### Training (energy URM on 10x10, matching baseline)
+```bash
+bash scripts/energy_small.sh
+# urm_energy_small: same arch as urm_small + 129-param energy head
+# 4000 epochs, eval every 200, batch 512, same hyperparams as baseline
+```
+
+### Training (energy-based URM on 30x30)
 ```bash
 bash scripts/URM_energy_arcagi1.sh
 ```
@@ -164,10 +173,11 @@ conda activate urm && python -m pytest tests/ -v
 - [x] All bugfixes from previous rounds
 - [x] Right-sized baseline model (urm_small: 2 layers, hidden=128, 530K params, ~38 it/s on 3090)
 - [x] Fix evaluator _crop() for variable grid sizes (was hardcoded to 30x30)
+- [x] Energy small config + training script for direct baseline comparison (urm_energy_small, +129 params)
 
 ### Experimental Plan
 1. **Run baseline URM** on 10x10 (`bash scripts/baseline_small.sh`) — establish ACT pass@K — **RUNNING**
-2. **Energy stopping + reranking** vs ACT baseline — compare energy_pass@K vs pass@K
+2. **Run energy URM** on 10x10 (`bash scripts/energy_small.sh`) — compare energy_pass@K vs pass@K — **READY**
 3. **Ablation**: +N MCMC refinement steps vs +N extra URM passes
 4. Tune contrastive_margin and contrastive_weight
 5. Scale to 30×30 grids once 10×10 pipeline validated
@@ -176,6 +186,7 @@ conda activate urm && python -m pytest tests/ -v
 | Config | Layers | Hidden | Heads | Params | Speed (3090) | Data |
 |--------|--------|--------|-------|--------|-------------|------|
 | urm_small | 2 | 128 | 4 | 530K (+33M puzzle_emb) | ~38 it/s | 10x10 |
+| urm_energy_small | 2 | 128 | 4 | 531K (+33M puzzle_emb) | ~3.5 it/s | 10x10 |
 | urm | 8 | 512 | 8 | ~40M (+33M puzzle_emb) | ~2 it/s | 30x30 |
 
 Note: `eval_interval` is in *epochs* not steps. Each epoch = ~294 puzzle groups (~40 steps, ~1 min) at batch_size=32 on the 10x10 dataset.

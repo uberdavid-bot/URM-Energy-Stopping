@@ -174,13 +174,30 @@ conda activate urm && python -m pytest tests/ -v
 - [x] Right-sized baseline model (urm_small: 2 layers, hidden=128, 530K params, ~38 it/s on 3090)
 - [x] Fix evaluator _crop() for variable grid sizes (was hardcoded to 30x30)
 - [x] Energy small config + training script for direct baseline comparison (urm_energy_small, +129 params)
+- [x] Fixed-iteration eval: energy model uses same `loops` count as baseline during eval (energy convergence stopping only active during training)
+- [x] Safety cap (max_inference_steps=100) in evaluate() while loop
+- [x] Verified: eval completes in exactly 16 steps/batch, energy metrics + ARC/energy_pass@K flow to wandb
 
 ### Experimental Plan
+
+#### Experiment 1: Fixed iterations, energy reranking vs Q-halt reranking (current)
+Both models run the same number of inner loop iterations (`loops=16`). The only difference is how pass@K predictions are ranked:
+- **Baseline (urm_small)**: Q-halt head ranks predictions (learned halting probability as confidence)
+- **Energy (urm_energy_small)**: Energy function ranks predictions (lower energy = more confident)
+- Both `ARC/pass@K` (Q-based) and `ARC/energy_pass@K` (energy-based) are reported for the energy model
+- Energy convergence stopping is disabled during eval — both models use identical fixed iterations
+
+Steps:
 1. **Run baseline URM** on 10x10 (`bash scripts/baseline_small.sh`) — establish ACT pass@K — **RUNNING**
 2. **Run energy URM** on 10x10 (`bash scripts/energy_small.sh`) — compare energy_pass@K vs pass@K — **READY**
-3. **Ablation**: +N MCMC refinement steps vs +N extra URM passes
-4. Tune contrastive_margin and contrastive_weight
-5. Scale to 30×30 grids once 10×10 pipeline validated
+
+#### Experiment 2: Adaptive stopping comparison (future)
+Compare energy convergence stopping vs ACT halting, with matched total compute budget.
+
+#### Experiment 3: Ablations (future)
+- +N MCMC refinement steps vs +N extra URM passes
+- Tune contrastive_margin and contrastive_weight
+- Scale to 30×30 grids once 10×10 pipeline validated
 
 ### Model configs
 | Config | Layers | Hidden | Heads | Params | Speed (3090) | Data |

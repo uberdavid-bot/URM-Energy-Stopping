@@ -249,11 +249,14 @@ class URM_Energy(nn.Module):
         output_hidden = new_carry_inner.current_hidden[:, self.inner.puzzle_emb_len:]
         current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
 
-        # 4. Energy-based halting
+        # 4. Halting logic
         with torch.no_grad():
             new_steps = new_steps + 1
             halted = (new_steps >= self.config.loops)
-            if carry.prev_energy is not None:
+
+            # Energy-based early stopping only during training (experimental)
+            # During eval, use fixed iterations for fair comparison with baseline
+            if self.training and carry.prev_energy is not None:
                 energy_change = torch.abs(current_energy - carry.prev_energy)
                 converged = energy_change < self.config.energy_threshold
                 halted = halted | (converged & (new_steps >= self.config.min_steps))

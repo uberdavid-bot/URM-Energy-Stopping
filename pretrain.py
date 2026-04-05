@@ -671,13 +671,14 @@ def evaluate(
 
             # Forward
             inference_steps = 0
+            max_inference_steps = 100  # Safety cap
             while True:
                 carry, loss, metrics, preds, all_finish = train_state.model(
                     carry=carry, batch=batch, return_keys=return_keys
                 )
                 inference_steps += 1
 
-                if all_finish:
+                if all_finish or inference_steps >= max_inference_steps:
                     break
 
             if rank == 0:

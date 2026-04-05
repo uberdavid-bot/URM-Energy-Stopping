@@ -1,0 +1,39 @@
+# Energy-based URM: reconstruction + contrastive loss
+# Energy function provides stopping criterion and pass@K reranking
+#
+# To enable MCMC refinement (experimental):
+#   dsm_weight: 1.0, refine_steps: 8, refine_step_size: 0.01
+
+name: urm.urm_energy@URM_Energy
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+
+loops: 16
+num_layers: 2
+hidden_size: 128
+num_heads: 4
+expansion: 4
+
+H_cycles: 2
+L_cycles: 4
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+# Energy stopping
+energy_threshold: 0.005
+min_steps: 8
+
+# Loss weights
+dsm_weight: 0.0
+contrastive_weight: 1.0
+contrastive_margin: 0.5
+dsm_noise_scales: [0.1, 0.3, 0.5, 1.0]
+
+# MCMC refinement (disabled)
+refine_steps: 0
+refine_step_size: 0.01
+
+ema: True
+ema_rate: 0.999

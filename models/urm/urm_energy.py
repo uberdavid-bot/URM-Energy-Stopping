@@ -51,6 +51,9 @@ class URMConfig(BaseModel):
     mcmc_steps: int = 0
     mcmc_step_size: float = 0.01
     mcmc_training: bool = False
+    # Dual reconstruction loss weights (only used when MCMC active)
+    unrefined_loss_weight: float = 0.5
+    refined_loss_weight: float = 0.5
 
 class URMBlock(nn.Module):
     def __init__(self, config: URMConfig) -> None:

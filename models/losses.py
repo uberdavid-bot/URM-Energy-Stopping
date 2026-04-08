@@ -184,8 +184,21 @@ class EnergyLossHead(nn.Module):
                 metrics["mcmc_improvement"] = (refined_correct - unrefined_correct).mean()
                 metrics["unrefined_accuracy"] = torch.where(valid_metrics, unrefined_correct, 0).sum()
 
-        # Reconstruction loss (standard LM loss on URM output — refined logits if MCMC active)
-        lm_loss = (self.loss_fn(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
+        # Reconstruction loss — dual loss when MCMC active
+        # Unrefined loss: clean URM learning signal (always computed)
+        # Refined loss: trains energy head through MCMC (only when MCMC active)
+        unrefined_logits = outputs.get("unrefined_logits", outputs["logits"])
+        unrefined_lm_loss = (self.loss_fn(unrefined_logits, labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
+
+        if "unrefined_logits" in outputs:
+            refined_lm_loss = (self.loss_fn(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
+            w_unrefined = self.model.config.unrefined_loss_weight
+            w_refined = self.model.config.refined_loss_weight
+            lm_loss = w_unrefined * unrefined_lm_loss + w_refined * refined_lm_loss
+            metrics["unrefined_lm_loss"] = unrefined_lm_loss.detach()
+            metrics["refined_lm_loss"] = refined_lm_loss.detach()
+        else:
+            lm_loss = unrefined_lm_loss
 
         # Embed inputs and true targets (shared by DSM and contrastive)
         input_embeddings = self.model.inner._input_embeddings(

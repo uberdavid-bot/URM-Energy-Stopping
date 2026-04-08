@@ -77,17 +77,21 @@ Two losses:
 
 ### Training (with MCMC refinement via second-order gradients)
 ```
-input ��� [URM inner: shared layer × H_cycles × L_cycles] → initial logits
+input → [URM inner: shared layer × H_cycles × L_cycles] → initial logits
       → convert to soft embeddings: softmax(logits) @ embed_tokens.weight
       → MCMC loop (N steps, create_graph=True):
             energy = E(input_emb, predicted_emb)
             grad = ∇E w.r.t. predicted_emb (create_graph=True)
             predicted_emb = predicted_emb - alpha * normalized_grad
       → refined logits = lm_head(refined_emb)
-Loss = reconstruction(refined_logits, labels) + contrastive_weight * contrastive(E)
+Loss = w_unrefined * recon(unrefined_logits) + w_refined * recon(refined_logits) + contrastive_weight * contrastive(E)
 ```
 
-The reconstruction loss on MCMC-refined output flows back through the MCMC steps into the energy head via second-order gradients. This teaches the energy head to produce gradients that actually improve predictions. No DSM loss needed — reconstruction through MCMC is strictly more informative. Contrastive loss is kept as auxiliary at reduced weight (0.5).
+**Dual reconstruction loss**: Loss is computed on BOTH unrefined and refined logits (default 0.5/0.5 weight). The unrefined loss gives the URM a clean learning signal independent of MCMC quality. The refined loss flows back through MCMC into the energy head via second-order gradients, teaching it to produce useful gradients. This prevents the failure mode where the URM learns to produce outputs only good *after* MCMC — early in training when MCMC is unreliable, the unrefined loss keeps the URM learning correctly.
+
+**Inference**: MCMC refinement at eval is disabled (`refine_steps: 0`) until the energy head is well-trained. Eval uses raw URM output, so pass@K reflects actual prediction quality. Re-enable once `mcmc_improvement` is consistently positive during training.
+
+Contrastive loss is kept as auxiliary at reduced weight (0.5) for energy value separation.
 
 ### Training (with DSM, legacy approach)
 ```
@@ -169,7 +173,8 @@ bash scripts/URM_energy_arcagi1.sh
 ```bash
 bash scripts/energy_mcmc_small.sh
 # urm_energy_mcmc_small: same arch + MCMC refinement (4 steps, create_graph=True)
-# 4000 epochs, eval every 200, batch 512, contrastive_weight=0.5
+# 12000 epochs, eval every 600, batch 512, dual loss (0.5 unrefined + 0.5 refined)
+# Inference MCMC disabled (refine_steps=0) — eval uses raw URM output
 ```
 
 ### Training (with DSM refinement, legacy)
@@ -204,6 +209,10 @@ conda activate urm && python -m pytest tests/ -v
 - [x] MCMC training config (urm_energy_mcmc_small) and launch script (energy_mcmc_small.sh)
 - [x] MCMC improvement metrics (mcmc_improvement, unrefined_accuracy) in EnergyLossHead + pretrain.py logging
 - [x] Tests for MCMC training: creates_graph, energy_head_gets_gradients, improves_logits, eval_no_create_graph, disabled_by_default
+- [x] Fix: dual reconstruction loss on both unrefined and refined logits (prevents URM degradation from unreliable early MCMC)
+- [x] Configurable loss weights: unrefined_loss_weight, refined_loss_weight (default 0.5/0.5)
+- [x] Disable inference MCMC refinement (refine_steps=0) until energy head well-trained
+- [x] Dual loss metrics: unrefined_lm_loss, refined_lm_loss logged separately
 
 ### Experimental Plan
 
@@ -229,16 +238,22 @@ Three-way comparison (all on 10x10 grids):
 - **Energy reranking (urm_energy_small)**: Energy function ranks predictions, no MCMC
 - **Energy MCMC (urm_energy_mcmc_small)**: Energy MCMC refines predictions + energy reranking
 
-Key differences from old DSM-based MCMC:
-- Reconstruction loss on MCMC-refined output provides direct training signal to energy head
-- No DSM loss needed — reconstruction through MCMC is strictly more informative
+Key design decisions:
+- **Dual reconstruction loss**: Loss computed on both unrefined (clean URM signal) and refined (energy head training signal) logits, weighted 0.5/0.5. This prevents the URM from degrading when MCMC is unreliable early in training.
+- **Inference MCMC disabled**: `refine_steps=0` until energy head produces consistently positive `mcmc_improvement`. Eval uses raw URM output so pass@K reflects actual prediction quality.
 - Contrastive loss kept as auxiliary (weight=0.5) for energy value separation
 - `mcmc_training=True` enables `create_graph=True` during training; eval uses `create_graph=False`
+
+Metrics to watch:
+- `unrefined_lm_loss`: should decrease steadily (clean URM learning)
+- `refined_lm_loss`: may start high, should decrease as energy head improves
+- `mcmc_improvement`: negative early (MCMC hurts), should trend toward positive
+- `unrefined_accuracy`: should track close to non-MCMC energy model
 
 Steps:
 1. **Run MCMC energy URM** on 10x10 (`bash scripts/energy_mcmc_small.sh`) — **READY**
 2. Compare `energy_pass@K` across all three models
-3. Monitor `mcmc_improvement` metric (did MCMC steps help predictions?)
+3. Monitor `mcmc_improvement` — once consistently positive, re-enable `refine_steps: 4` for inference
 
 #### Experiment 4: Ablations (future)
 - +N MCMC refinement steps vs +N extra URM passes

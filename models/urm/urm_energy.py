@@ -47,6 +47,10 @@ class URMConfig(BaseModel):
     contrastive_margin: float = 0.5
     refine_steps: int = 0
     refine_step_size: float = 0.01
+    # MCMC training (second-order gradients through MCMC into energy head)
+    mcmc_steps: int = 0
+    mcmc_step_size: float = 0.01
+    mcmc_training: bool = False
 
 class URMBlock(nn.Module):
     def __init__(self, config: URMConfig) -> None:
@@ -249,6 +253,38 @@ class URM_Energy(nn.Module):
         output_hidden = new_carry_inner.current_hidden[:, self.inner.puzzle_emb_len:]
         current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
 
+        # 3b. MCMC refinement with second-order gradients (training only)
+        # Reconstruction loss on refined logits flows back through MCMC into energy head,
+        # teaching it to produce gradients that improve predictions.
+        unrefined_logits = None
+        if self.config.mcmc_steps > 0 and self.config.mcmc_training and self.training:
+            unrefined_logits = logits
+            # Convert logits to soft embeddings
+            probs = F.softmax(logits.float(), dim=-1)
+            predicted_emb = (probs @ self.inner.embed_tokens.embedding_weight.data.float()).to(
+                self.inner.forward_dtype
+            )
+            # MCMC loop with create_graph=True for second-order gradients
+            for _ in range(self.config.mcmc_steps):
+                predicted_emb = predicted_emb.detach().requires_grad_(True)
+                energy = self.compute_joint_energy(input_embeddings, predicted_emb)
+                grad = torch.autograd.grad(
+                    energy.sum(), predicted_emb, create_graph=True
+                )[0]
+                grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                grad = grad / grad_norm
+                predicted_emb = predicted_emb - self.config.mcmc_step_size * grad
+            # Convert refined embeddings back to logits
+            logits = self.inner.lm_head(predicted_emb.to(self.inner.forward_dtype))
+        elif self.config.mcmc_steps > 0 and not self.training:
+            # Inference: use refine_with_mcmc without create_graph
+            unrefined_logits = logits
+            logits = self.refine_with_mcmc(
+                logits, input_embeddings,
+                steps=self.config.mcmc_steps,
+                step_size=self.config.mcmc_step_size,
+            )
+
         # 4. Halting logic
         with torch.no_grad():
             new_steps = new_steps + 1
@@ -271,6 +307,8 @@ class URM_Energy(nn.Module):
             "q_halt_logits": torch.zeros_like(current_energy),
             "q_continue_logits": torch.zeros_like(current_energy),
         }
+        if unrefined_logits is not None:
+            outputs["unrefined_logits"] = unrefined_logits
 
         return (
             URMCarry(

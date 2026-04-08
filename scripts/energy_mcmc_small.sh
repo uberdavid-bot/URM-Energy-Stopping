@@ -6,8 +6,8 @@ mkdir -p $checkpoint_path
 DISABLE_COMPILE=1 torchrun --nproc-per-node 1 pretrain.py \
   data_path=data/arc1concept-aug-1000-size-10 \
   arch=urm_energy_mcmc_small \
-  epochs=4000 \
-  eval_interval=200 \
+  epochs=12000 \
+  eval_interval=600 \
   global_batch_size=512 \
   lr=3e-4 \
   lr_min_ratio=0.1 \

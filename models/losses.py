@@ -174,7 +174,17 @@ class EnergyLossHead(nn.Module):
                 "steps": torch.where(valid_metrics, new_carry.steps, 0).sum(),
             }
 
-        # Reconstruction loss (standard LM loss on URM output)
+        # MCMC improvement metrics (compare refined vs unrefined predictions)
+        with torch.no_grad():
+            if "unrefined_logits" in outputs:
+                unrefined_preds = torch.argmax(outputs["unrefined_logits"], dim=-1)
+                refined_preds = outputs["preds"]
+                unrefined_correct = (mask & (unrefined_preds == labels)).sum(-1).float() / loss_divisor.squeeze(-1)
+                refined_correct = (mask & (refined_preds == labels)).sum(-1).float() / loss_divisor.squeeze(-1)
+                metrics["mcmc_improvement"] = (refined_correct - unrefined_correct).mean()
+                metrics["unrefined_accuracy"] = torch.where(valid_metrics, unrefined_correct, 0).sum()
+
+        # Reconstruction loss (standard LM loss on URM output — refined logits if MCMC active)
         lm_loss = (self.loss_fn(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
 
         # Embed inputs and true targets (shared by DSM and contrastive)

@@ -434,5 +434,92 @@ class TestDSMSkippedWhenWeightZero:
         )
 
 
+class TestMCMCTraining:
+    def test_mcmc_training_creates_graph(self):
+        """Forward in train mode with mcmc_training=True should produce logits with grad_fn."""
+        config = make_config(mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True)
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        _, outputs = model(carry, batch)
+
+        assert outputs["logits"].grad_fn is not None, (
+            "Refined logits should have grad_fn (computation graph for backprop through MCMC)"
+        )
+        assert "unrefined_logits" in outputs, "Should store unrefined logits for comparison"
+
+    def test_mcmc_training_energy_head_gets_gradients(self):
+        """Backward through MCMC-refined logits should give energy_head non-zero gradients."""
+        config = make_config(mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True)
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        _, outputs = model(carry, batch)
+
+        # Compute reconstruction loss on refined logits
+        labels = batch["labels"]
+        loss = torch.nn.functional.cross_entropy(
+            outputs["logits"].view(-1, config["vocab_size"]),
+            labels.view(-1),
+            ignore_index=-100,
+        )
+        loss.backward()
+
+        assert model.energy_head.weight.grad is not None, (
+            "energy_head has no gradients after backward through MCMC-refined logits"
+        )
+        assert model.energy_head.weight.grad.abs().sum() > 0, (
+            "energy_head gradients are all zero — second-order gradients not flowing"
+        )
+
+    def test_mcmc_improves_logits(self):
+        """MCMC refinement should produce different logits than unrefined."""
+        config = make_config(mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True)
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        _, outputs = model(carry, batch)
+
+        assert not torch.allclose(
+            outputs["logits"].detach(), outputs["unrefined_logits"].detach(), atol=1e-5
+        ), "MCMC refinement did not change logits"
+
+    def test_mcmc_eval_no_create_graph(self):
+        """Eval mode with mcmc_steps>0 should work without create_graph."""
+        config = make_config(mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True)
+        model = URM_Energy(config).to(DEVICE).eval()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        with torch.no_grad():
+            _, outputs = model(carry, batch)
+
+        assert "unrefined_logits" in outputs, "Should still store unrefined logits at eval"
+        assert not torch.allclose(
+            outputs["logits"], outputs["unrefined_logits"], atol=1e-5
+        ), "MCMC refinement should change logits at eval too"
+
+    def test_mcmc_disabled_by_default(self):
+        """Default config (mcmc_steps=0) should not apply MCMC refinement."""
+        config = make_config()  # mcmc_steps defaults to 0
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        _, outputs = model(carry, batch)
+
+        assert "unrefined_logits" not in outputs, (
+            "unrefined_logits should not be present when MCMC is disabled"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

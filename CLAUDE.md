@@ -49,9 +49,11 @@ This project replaces ACT with an **energy-based stopping criterion**. Instead o
 - `models/dsm_loss.py` — Multi-scale Denoising Score Matching loss (for training energy gradients, optional)
 - `config/arch/urm_energy.yaml` — Hydra config with two modes: default and MCMC refinement
 - `config/arch/urm_energy_small.yaml` — Energy URM for 10x10 grids (matches urm_small arch, +129 params for energy head)
+- `config/arch/urm_energy_mcmc_small.yaml` — MCMC refinement with second-order gradients (mcmc_steps=4, create_graph=True)
 - `config/arch/urm_small.yaml` — Right-sized baseline URM for 10x10 grids (2 layers, hidden=128, 530K params)
 - `scripts/URM_energy_arcagi1.sh` — Launch script for energy experiments
 - `scripts/energy_small.sh` — Launch script for energy model on 10x10 grids (direct baseline comparison)
+- `scripts/energy_mcmc_small.sh` — Launch script for MCMC energy model on 10x10 grids
 - `scripts/baseline_small.sh` — Launch script for baseline URM on 10x10 grids
 - `tests/test_mcmc_inference.py` — Tests for losses, forward pass, energy halting, MCMC refinement, evaluator ranking
 
@@ -73,12 +75,26 @@ Two losses:
 - **Reconstruction**: standard LM loss on URM output logits — trains the main predictor
 - **Contrastive**: trains energy values so E(true) < E(predicted) - margin — for stopping and reranking
 
-### Training (with MCMC refinement, experimental)
+### Training (with MCMC refinement via second-order gradients)
+```
+input ��� [URM inner: shared layer × H_cycles × L_cycles] → initial logits
+      → convert to soft embeddings: softmax(logits) @ embed_tokens.weight
+      → MCMC loop (N steps, create_graph=True):
+            energy = E(input_emb, predicted_emb)
+            grad = ∇E w.r.t. predicted_emb (create_graph=True)
+            predicted_emb = predicted_emb - alpha * normalized_grad
+      → refined logits = lm_head(refined_emb)
+Loss = reconstruction(refined_logits, labels) + contrastive_weight * contrastive(E)
+```
+
+The reconstruction loss on MCMC-refined output flows back through the MCMC steps into the energy head via second-order gradients. This teaches the energy head to produce gradients that actually improve predictions. No DSM loss needed — reconstruction through MCMC is strictly more informative. Contrastive loss is kept as auxiliary at reduced weight (0.5).
+
+### Training (with DSM, legacy approach)
 ```
 Loss = reconstruction + contrastive + dsm_weight * DSM(energy_head)
 ```
 
-DSM (Denoising Score Matching) trains energy *gradients* to point from corrupted toward clean outputs. This is only needed for MCMC refinement at inference. Enable with `dsm_weight: 1.0`.
+DSM (Denoising Score Matching) trains energy *gradients* to point from corrupted toward clean outputs. This was the original approach for MCMC refinement at inference. Superseded by second-order gradient training. Enable with `dsm_weight: 1.0`.
 
 ### Inference
 ```
@@ -149,9 +165,16 @@ bash scripts/energy_small.sh
 bash scripts/URM_energy_arcagi1.sh
 ```
 
-### Training (with MCMC refinement, experimental)
+### Training (energy URM with MCMC refinement on 10x10)
 ```bash
-# Same as above, plus:
+bash scripts/energy_mcmc_small.sh
+# urm_energy_mcmc_small: same arch + MCMC refinement (4 steps, create_graph=True)
+# 4000 epochs, eval every 200, batch 512, contrastive_weight=0.5
+```
+
+### Training (with DSM refinement, legacy)
+```bash
+# Same as energy training, plus:
 #   arch.dsm_weight=1.0 arch.refine_steps=8 arch.refine_step_size=0.01
 ```
 
@@ -177,6 +200,10 @@ conda activate urm && python -m pytest tests/ -v
 - [x] Fixed-iteration eval: energy model uses same `loops` count as baseline during eval (energy convergence stopping only active during training)
 - [x] Safety cap (max_inference_steps=100) in evaluate() while loop
 - [x] Verified: eval completes in exactly 16 steps/batch, energy metrics + ARC/energy_pass@K flow to wandb
+- [x] MCMC refinement with second-order gradients: reconstruction loss flows back through MCMC into energy head
+- [x] MCMC training config (urm_energy_mcmc_small) and launch script (energy_mcmc_small.sh)
+- [x] MCMC improvement metrics (mcmc_improvement, unrefined_accuracy) in EnergyLossHead + pretrain.py logging
+- [x] Tests for MCMC training: creates_graph, energy_head_gets_gradients, improves_logits, eval_no_create_graph, disabled_by_default
 
 ### Experimental Plan
 
@@ -194,7 +221,26 @@ Steps:
 #### Experiment 2: Adaptive stopping comparison (future)
 Compare energy convergence stopping vs ACT halting, with matched total compute budget.
 
-#### Experiment 3: Ablations (future)
+#### Experiment 3: MCMC refinement with second-order gradients (current)
+Core thesis: EBT-style MCMC refinement on a small recurrent model. URM inner recurrence produces initial prediction, then MCMC steps refine it by descending the energy gradient in output embedding space. Second-order gradients through the MCMC steps train the energy head to produce gradients that actually improve predictions.
+
+Three-way comparison (all on 10x10 grids):
+- **Baseline (urm_small)**: Q-halt head ranks predictions, no energy
+- **Energy reranking (urm_energy_small)**: Energy function ranks predictions, no MCMC
+- **Energy MCMC (urm_energy_mcmc_small)**: Energy MCMC refines predictions + energy reranking
+
+Key differences from old DSM-based MCMC:
+- Reconstruction loss on MCMC-refined output provides direct training signal to energy head
+- No DSM loss needed — reconstruction through MCMC is strictly more informative
+- Contrastive loss kept as auxiliary (weight=0.5) for energy value separation
+- `mcmc_training=True` enables `create_graph=True` during training; eval uses `create_graph=False`
+
+Steps:
+1. **Run MCMC energy URM** on 10x10 (`bash scripts/energy_mcmc_small.sh`) — **READY**
+2. Compare `energy_pass@K` across all three models
+3. Monitor `mcmc_improvement` metric (did MCMC steps help predictions?)
+
+#### Experiment 4: Ablations (future)
 - +N MCMC refinement steps vs +N extra URM passes
 - Tune contrastive_margin and contrastive_weight
 - Scale to 30×30 grids once 10×10 pipeline validated
@@ -204,6 +250,7 @@ Compare energy convergence stopping vs ACT halting, with matched total compute b
 |--------|--------|--------|-------|--------|-------------|------|
 | urm_small | 2 | 128 | 4 | 530K (+33M puzzle_emb) | ~38 it/s | 10x10 |
 | urm_energy_small | 2 | 128 | 4 | 531K (+33M puzzle_emb) | ~3.5 it/s | 10x10 |
+| urm_energy_mcmc_small | 2 | 128 | 4 | 531K (+33M puzzle_emb) | TBD | 10x10 |
 | urm | 8 | 512 | 8 | ~40M (+33M puzzle_emb) | ~2 it/s | 30x30 |
 
 Note: `eval_interval` is in *epochs* not steps. Each epoch = ~294 puzzle groups (~40 steps, ~1 min) at batch_size=32 on the 10x10 dataset.

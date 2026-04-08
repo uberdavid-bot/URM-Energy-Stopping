@@ -1,0 +1,42 @@
+# MCMC refinement with second-order gradients
+# URM recurrence → MCMC refinement via energy gradients → reconstruction loss
+# Gradients flow back through MCMC into energy head
+
+name: urm.urm_energy@URM_Energy
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+
+loops: 16
+num_layers: 2
+hidden_size: 128
+num_heads: 4
+expansion: 4
+
+H_cycles: 2
+L_cycles: 4
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+# Energy stopping (training only, eval uses fixed loops)
+energy_threshold: 0.05
+min_steps: 8
+
+# MCMC refinement
+mcmc_steps: 4
+mcmc_step_size: 0.01
+mcmc_training: true
+
+# Loss weights
+dsm_weight: 0.0
+contrastive_weight: 0.5
+contrastive_margin: 0.5
+dsm_noise_scales: [0.1, 0.3, 0.5, 1.0]
+
+# Inference refinement (uses same mcmc_steps but without create_graph)
+refine_steps: 4
+refine_step_size: 0.01
+
+ema: True
+ema_rate: 0.999

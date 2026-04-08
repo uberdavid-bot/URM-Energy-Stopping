@@ -570,6 +570,10 @@ def train_batch(
                 for k, v in metrics.items():
                     if k.startswith('grad_norm_sigma_'):
                         print(f"  {k}: {v:.4f}")
+            if 'unrefined_lm_loss' in metrics:
+                print(f"  Unrefined LM loss: {metrics['unrefined_lm_loss']:.4f}")
+            if 'refined_lm_loss' in metrics:
+                print(f"  Refined LM loss: {metrics['refined_lm_loss']:.4f}")
             if 'mcmc_improvement' in metrics:
                 print(f"  MCMC improvement: {metrics['mcmc_improvement']:.4f}")
             if 'unrefined_accuracy' in metrics:

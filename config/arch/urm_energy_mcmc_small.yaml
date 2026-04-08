@@ -34,8 +34,13 @@ contrastive_weight: 0.5
 contrastive_margin: 0.5
 dsm_noise_scales: [0.1, 0.3, 0.5, 1.0]
 
-# Inference refinement (uses same mcmc_steps but without create_graph)
-refine_steps: 4
+# Dual reconstruction loss: train on both unrefined and refined logits
+# Unrefined loss gives clean URM learning signal; refined loss trains energy head
+unrefined_loss_weight: 0.5
+refined_loss_weight: 0.5
+
+# Inference refinement disabled until energy head is well-trained
+refine_steps: 0
 refine_step_size: 0.01
 
 ema: True

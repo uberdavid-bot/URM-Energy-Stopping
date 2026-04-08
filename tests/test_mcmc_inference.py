@@ -520,6 +520,41 @@ class TestMCMCTraining:
             "unrefined_logits should not be present when MCMC is disabled"
         )
 
+    def test_dual_loss_gradients_both_paths(self):
+        """Dual loss should give gradients to URM layers (unrefined) and energy_head (refined)."""
+        config = make_config(
+            mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True,
+            unrefined_loss_weight=0.5, refined_loss_weight=0.5,
+        )
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+        _, outputs = model(carry, batch)
+
+        labels = batch["labels"]
+        V = config["vocab_size"]
+        loss_fn = torch.nn.functional.cross_entropy
+
+        # Dual reconstruction loss
+        unrefined_loss = loss_fn(
+            outputs["unrefined_logits"].view(-1, V), labels.view(-1), ignore_index=-100
+        )
+        refined_loss = loss_fn(
+            outputs["logits"].view(-1, V), labels.view(-1), ignore_index=-100
+        )
+        total = 0.5 * unrefined_loss + 0.5 * refined_loss
+        total.backward()
+
+        # URM inner layers should get gradients from unrefined loss
+        layer_param = next(model.inner.layers[0].parameters())
+        assert layer_param.grad is not None, "URM layer has no gradients"
+        assert layer_param.grad.abs().sum() > 0, "URM layer gradients are zero"
+
+        # Energy head should get gradients from refined loss (through MCMC)
+        assert model.energy_head.weight.grad is not None, "energy_head has no gradients"
+        assert model.energy_head.weight.grad.abs().sum() > 0, "energy_head gradients are zero"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

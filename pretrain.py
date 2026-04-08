@@ -570,6 +570,10 @@ def train_batch(
                 for k, v in metrics.items():
                     if k.startswith('grad_norm_sigma_'):
                         print(f"  {k}: {v:.4f}")
+            if 'mcmc_improvement' in metrics:
+                print(f"  MCMC improvement: {metrics['mcmc_improvement']:.4f}")
+            if 'unrefined_accuracy' in metrics:
+                print(f"  Unrefined accuracy: {metrics['unrefined_accuracy']:.4f}")
 
     should_step = train_state.accum_step % accum_steps == 0
     if not should_step:

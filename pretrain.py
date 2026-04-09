@@ -565,11 +565,6 @@ def train_batch(
                 print(f"  Predicted energy: {metrics['predicted_energy']:.4f}")
             if 'energy_gap' in metrics:
                 print(f"  Energy gap (pred-true): {metrics['energy_gap']:.4f}")
-            if 'dsm_loss' in metrics and metrics['dsm_loss'] > 0:
-                print(f"  DSM loss: {metrics['dsm_loss']:.4f}")
-                for k, v in metrics.items():
-                    if k.startswith('grad_norm_sigma_'):
-                        print(f"  {k}: {v:.4f}")
             if 'unrefined_lm_loss' in metrics:
                 print(f"  Unrefined LM loss: {metrics['unrefined_lm_loss']:.4f}")
             if 'refined_lm_loss' in metrics:

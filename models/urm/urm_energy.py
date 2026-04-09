@@ -41,8 +41,6 @@ class URMConfig(BaseModel):
     # Energy-specific
     energy_threshold: float = 0.005
     min_steps: int = 8
-    dsm_noise_scales: List[float] = [0.1, 0.3, 0.5, 1.0]
-    dsm_weight: float = 0.0
     contrastive_weight: float = 1.0
     contrastive_margin: float = 0.5
     refine_steps: int = 0
@@ -264,34 +262,27 @@ class URM_Energy(nn.Module):
         output_hidden = new_carry_inner.current_hidden[:, self.inner.puzzle_emb_len:]
         current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
 
-        # 3b. MCMC refinement with second-order gradients (training only)
-        # Reconstruction loss on refined logits flows back through MCMC into energy head,
-        # teaching it to produce gradients that improve predictions.
+        # 3b. MCMC refinement in hidden space
+        # Training: second-order gradients (create_graph=True) flow through MCMC into energy head.
+        # Inference: detach between steps to save memory.
         unrefined_logits = None
         if self.config.mcmc_steps > 0 and self.config.mcmc_training and self.training:
             unrefined_logits = logits
-            # Convert logits to soft embeddings
-            probs = F.softmax(logits.float(), dim=-1)
-            predicted_emb = (probs @ self.inner.embed_tokens.embedding_weight.data.float()).to(
-                self.inner.forward_dtype
-            )
-            # MCMC loop with create_graph=True for second-order gradients
+            hidden = output_hidden
+            if not hidden.requires_grad:
+                hidden = hidden.requires_grad_(True)
             for _ in range(self.config.mcmc_steps):
-                predicted_emb = predicted_emb.detach().requires_grad_(True)
-                energy = self.compute_joint_energy(input_embeddings, predicted_emb)
+                energy = self.compute_joint_energy(input_embeddings, hidden)
                 grad = torch.autograd.grad(
-                    energy.sum(), predicted_emb, create_graph=True
+                    energy.sum(), hidden, create_graph=True
                 )[0]
-                grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-                grad = grad / grad_norm
-                predicted_emb = predicted_emb - self.config.mcmc_step_size * grad
-            # Convert refined embeddings back to logits
-            logits = self.inner.lm_head(predicted_emb.to(self.inner.forward_dtype))
+                grad = grad / grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                hidden = hidden - self.config.mcmc_step_size * grad
+            logits = self.inner.lm_head(hidden)
         elif self.config.mcmc_steps > 0 and not self.training:
-            # Inference: use refine_with_mcmc without create_graph
             unrefined_logits = logits
             logits = self.refine_with_mcmc(
-                logits, input_embeddings,
+                output_hidden, input_embeddings,
                 steps=self.config.mcmc_steps,
                 step_size=self.config.mcmc_step_size,
             )
@@ -335,24 +326,20 @@ class URM_Energy(nn.Module):
             outputs,
         )
 
-    def refine_with_mcmc(self, logits: torch.Tensor, input_embeddings: torch.Tensor,
+    def refine_with_mcmc(self, hidden: torch.Tensor, input_embeddings: torch.Tensor,
                          steps: int = 8, step_size: float = 0.01) -> torch.Tensor:
         """
         Post-hoc MCMC refinement at inference time only.
-        Uses DSM-trained energy gradients to polish URM predictions.
+        Uses energy gradients in hidden space to refine URM predictions.
+        Detaches between steps to save memory (no second-order gradients needed).
         """
-        probs = F.softmax(logits.float(), dim=-1)
-        predicted_emb = (probs @ self.inner.embed_tokens.embedding_weight.data.float()).to(
-            self.inner.forward_dtype
-        ).detach().requires_grad_(True)
+        hidden = hidden.detach().requires_grad_(True)
 
         for _ in range(steps):
             with torch.enable_grad():
-                energy = self.compute_joint_energy(input_embeddings, predicted_emb)
-                grad = torch.autograd.grad(energy.sum(), predicted_emb)[0]
-                grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-                grad = grad / grad_norm
-            predicted_emb = (predicted_emb - step_size * grad).detach().requires_grad_(True)
+                energy = self.compute_joint_energy(input_embeddings, hidden)
+                grad = torch.autograd.grad(energy.sum(), hidden)[0]
+                grad = grad / grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            hidden = (hidden - step_size * grad).detach().requires_grad_(True)
 
-        refined_logits = self.inner.lm_head(predicted_emb.to(self.inner.forward_dtype))
-        return refined_logits
+        return self.inner.lm_head(hidden.to(self.inner.forward_dtype))

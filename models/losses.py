@@ -200,7 +200,7 @@ class EnergyLossHead(nn.Module):
         else:
             lm_loss = unrefined_lm_loss
 
-        # Embed inputs and true targets (shared by DSM and contrastive)
+        # Embed inputs and true targets for contrastive loss
         input_embeddings = self.model.inner._input_embeddings(
             new_carry.current_data["inputs"],
             new_carry.current_data["puzzle_identifiers"]
@@ -208,20 +208,6 @@ class EnergyLossHead(nn.Module):
         true_embeddings = self.model.inner.embed_tokens(labels.clamp(min=0))
         true_embeddings = true_embeddings * mask.unsqueeze(-1).float()
         true_embeddings = self.model.inner.embed_scale * true_embeddings
-
-        # DSM loss (only when dsm_weight > 0 — saves compute)
-        dsm_weight = self.model.config.dsm_weight
-        if dsm_weight > 0:
-            from models.dsm_loss import dsm_loss as dsm_loss_fn
-            dsm_loss_val, dsm_metrics = dsm_loss_fn(
-                energy_fn=self.model.compute_joint_energy,
-                clean_embeddings=true_embeddings.detach(),
-                input_embeddings=input_embeddings.detach(),
-                noise_scales=self.model.config.dsm_noise_scales,
-            )
-            metrics.update(dsm_metrics)
-        else:
-            dsm_loss_val = torch.tensor(0.0, device=labels.device)
 
         # Contrastive loss: E(true) should be lower than E(predicted) by margin
         true_energy = self.model.compute_joint_energy(
@@ -233,7 +219,6 @@ class EnergyLossHead(nn.Module):
 
         metrics.update({
             "reconstruction_loss": lm_loss.detach(),
-            "dsm_loss": dsm_loss_val.detach(),
             "contrastive_loss": contrastive_loss.detach(),
             "current_energy": outputs["current_energy"].mean().detach(),
             "true_energy": true_energy.mean().detach(),
@@ -271,7 +256,7 @@ class EnergyLossHead(nn.Module):
         metrics["trajectory_loss_total"] = trajectory_loss_val.detach()
 
         contrastive_weight = self.model.config.contrastive_weight
-        total_loss = (lm_loss + dsm_weight * dsm_loss_val
+        total_loss = (lm_loss
                       + contrastive_weight * contrastive_loss
                       + self.model.config.trajectory_loss_weight * trajectory_loss_val)
 

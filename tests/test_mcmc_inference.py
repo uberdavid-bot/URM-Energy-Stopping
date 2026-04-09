@@ -1,12 +1,11 @@
 """
-Tests for DSM-based URM_Energy architecture.
+Tests for URM_Energy architecture: energy head, MCMC refinement, trajectory supervision.
 
 Requires CUDA — runs real flash_attn and model code on GPU.
 """
 import torch
 import pytest
 from models.urm.urm_energy import URM_Energy
-from models.dsm_loss import dsm_loss
 
 DEVICE = "cuda"
 
@@ -29,7 +28,6 @@ def make_config(**overrides):
         forward_dtype="bfloat16",
         energy_threshold=1e-6,
         min_steps=8,
-        dsm_noise_scales=[0.1, 0.5, 1.0],
     )
     config.update(overrides)
     return config
@@ -54,49 +52,6 @@ def make_carry(model, batch):
 def skip_without_cuda():
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
-
-
-class TestDSMLoss:
-    def test_dsm_loss_gradient_direction(self):
-        """DSM loss should decrease when energy gradient points toward clean data."""
-        config = make_config()
-        model = URM_Energy(config).to(DEVICE)
-
-        B, S, H = 2, config["seq_len"], config["hidden_size"]
-        dtype = model.inner.forward_dtype
-        input_emb = torch.randn(B, S, H, dtype=dtype, device=DEVICE)
-        clean_emb = torch.randn(B, S, H, dtype=dtype, device=DEVICE)
-
-        loss, metrics = dsm_loss(
-            energy_fn=model.compute_joint_energy,
-            clean_embeddings=clean_emb,
-            input_embeddings=input_emb,
-            noise_scales=[0.3],
-        )
-        assert loss.item() > 0, "DSM loss should be positive"
-        assert loss.grad_fn is not None, "DSM loss should be differentiable"
-
-    def test_dsm_loss_multiscale(self):
-        """DSM loss should compute across all noise scales and return per-scale metrics."""
-        config = make_config()
-        model = URM_Energy(config).to(DEVICE)
-
-        B, S, H = 2, config["seq_len"], config["hidden_size"]
-        dtype = model.inner.forward_dtype
-        input_emb = torch.randn(B, S, H, dtype=dtype, device=DEVICE)
-        clean_emb = torch.randn(B, S, H, dtype=dtype, device=DEVICE)
-
-        scales = [0.1, 0.5, 1.0]
-        loss, metrics = dsm_loss(
-            energy_fn=model.compute_joint_energy,
-            clean_embeddings=clean_emb,
-            input_embeddings=input_emb,
-            noise_scales=scales,
-        )
-
-        for sigma in scales:
-            assert f"dsm_loss_sigma_{sigma}" in metrics, f"Missing metric for sigma={sigma}"
-            assert f"grad_norm_sigma_{sigma}" in metrics, f"Missing grad_norm for sigma={sigma}"
 
 
 class TestURMEnergyForward:
@@ -228,7 +183,7 @@ class TestMCMCRefinement:
 
         with torch.no_grad():
             refined = model.refine_with_mcmc(
-                outputs["logits"], input_embeddings, steps=4, step_size=0.01
+                outputs["output_hidden"], input_embeddings, steps=4, step_size=0.01
             )
 
         assert not torch.allclose(outputs["logits"], refined, atol=1e-5), (
@@ -238,7 +193,7 @@ class TestMCMCRefinement:
 
 class TestEnergyLossHeadBackward:
     def test_energy_head_gets_gradients(self):
-        """After backward, energy_head parameters should have gradients from DSM loss."""
+        """After backward, energy_head parameters should have gradients from energy computation."""
         config = make_config()
         model = URM_Energy(config).to(DEVICE).train()
 
@@ -246,22 +201,17 @@ class TestEnergyLossHeadBackward:
         carry = make_carry(model, batch)
         _, outputs = model(carry, batch)
 
-        # Compute DSM loss directly (simulating what EnergyLossHead does)
+        # Energy computation always gives gradients to energy_head
         input_emb = model.inner._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
         labels = batch["labels"]
         true_emb = model.inner.embed_tokens(labels.clamp(min=0))
         true_emb = model.inner.embed_scale * true_emb
 
-        loss, _ = dsm_loss(
-            energy_fn=model.compute_joint_energy,
-            clean_embeddings=true_emb.detach(),
-            input_embeddings=input_emb.detach(),
-            noise_scales=[0.3],
-        )
-        loss.backward()
+        energy = model.compute_joint_energy(input_emb.detach(), true_emb.detach())
+        energy.sum().backward()
 
         assert model.energy_head.weight.grad is not None, (
-            "energy_head has no gradients after DSM backward"
+            "energy_head has no gradients after energy backward"
         )
         assert model.energy_head.weight.grad.abs().sum() > 0, (
             "energy_head gradients are all zero"
@@ -339,8 +289,8 @@ class TestContrastiveLoss:
         loss = torch.relu(true_energy - predicted_energy + margin).mean()
         assert loss.item() == 0.0
 
-    def test_contrastive_plus_dsm_backward(self):
-        """Both DSM and contrastive losses should contribute gradients to energy_head."""
+    def test_contrastive_backward(self):
+        """Contrastive loss should contribute gradients to energy_head when margin is active."""
         config = make_config()
         model = URM_Energy(config).to(DEVICE).train()
 
@@ -353,21 +303,12 @@ class TestContrastiveLoss:
         true_emb = model.inner.embed_tokens(labels.clamp(min=0))
         true_emb = model.inner.embed_scale * true_emb
 
-        # DSM loss
-        dsm_loss_val, _ = dsm_loss(
-            energy_fn=model.compute_joint_energy,
-            clean_embeddings=true_emb.detach(),
-            input_embeddings=input_emb.detach(),
-            noise_scales=[0.3],
-        )
-
-        # Contrastive loss
+        # Use large margin to ensure loss is active with random weights
         true_energy = model.compute_joint_energy(input_emb.detach(), true_emb.detach())
         predicted_energy = outputs["current_energy"]
-        contrastive_loss = torch.relu(true_energy - predicted_energy + 0.5).mean()
+        contrastive_loss = torch.relu(true_energy - predicted_energy + 100.0).mean()
 
-        total = dsm_loss_val + contrastive_loss
-        total.backward()
+        contrastive_loss.backward()
 
         assert model.energy_head.weight.grad is not None
         assert model.energy_head.weight.grad.abs().sum() > 0
@@ -404,34 +345,6 @@ class TestEnergyConfidenceRanking:
         # hash_a should be first (higher energy confidence = lower energy = better)
         assert ranked[0][0] == "hash_a"
         assert ranked[1][0] == "hash_b"
-
-
-class TestDSMSkippedWhenWeightZero:
-    def test_dsm_skipped_when_weight_zero(self):
-        """With dsm_weight=0, DSM loss should be 0 and training should still work via contrastive."""
-        from models.losses import EnergyLossHead
-
-        config = make_config(dsm_weight=0.0, contrastive_weight=1.0, contrastive_margin=0.5)
-        model = URM_Energy(config).to(DEVICE).train()
-        loss_head = EnergyLossHead(model, "stablemax_cross_entropy").to(DEVICE)
-
-        batch = make_batch(config)
-        with torch.device(DEVICE):
-            carry = loss_head.initial_carry(batch)
-
-        carry, loss, metrics, _, _ = loss_head(
-            return_keys=[], carry=carry, batch=batch
-        )
-
-        assert metrics["dsm_loss"].item() == 0.0, "DSM loss should be exactly 0 when dsm_weight=0"
-        assert metrics["contrastive_loss"].item() >= 0.0, "Contrastive loss should be computed"
-        assert loss.item() > 0, "Total loss should be positive from reconstruction + contrastive"
-
-        loss.backward()
-        # Energy head should still get gradients from contrastive loss
-        assert model.energy_head.weight.grad is not None, (
-            "energy_head should have gradients from contrastive loss even with dsm_weight=0"
-        )
 
 
 class TestMCMCTraining:
@@ -718,7 +631,7 @@ class TestTrajectoryRankingLoss:
         config = make_config(
             trajectory_loss_weight=1.0, trajectory_margin=0.1,
             loops=4,
-            contrastive_weight=0.5, dsm_weight=0.0,
+            contrastive_weight=0.5,
         )
         model = URM_Energy(config).to(DEVICE).train()
         loss_head = EnergyLossHead(model, "stablemax_cross_entropy").to(DEVICE)

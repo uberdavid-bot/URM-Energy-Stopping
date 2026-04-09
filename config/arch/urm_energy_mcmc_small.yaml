@@ -29,10 +29,8 @@ mcmc_step_size: 0.01
 mcmc_training: true
 
 # Loss weights
-dsm_weight: 0.0
 contrastive_weight: 0.5
 contrastive_margin: 0.5
-dsm_noise_scales: [0.1, 0.3, 0.5, 1.0]
 
 # Dual reconstruction loss: train on both unrefined and refined logits
 # Unrefined loss gives clean URM learning signal; refined loss trains energy head

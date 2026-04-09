@@ -32,9 +32,6 @@ trajectory_max_steps: 4
 contrastive_weight: 0.5
 contrastive_margin: 0.5
 
-# DSM disabled
-dsm_weight: 0.0
-dsm_noise_scales: [0.1, 0.3, 0.5, 1.0]
 
 # MCMC at inference only
 mcmc_steps: 0

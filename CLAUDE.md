@@ -80,11 +80,14 @@ Solo research project by David Colmenares (CMU Robotics PhD, Research Scientist 
 
 These are hard-won lessons. Violating any of these will waste experiment cycles.
 
-### MCMC must operate in hidden space, not soft-embedding space
-The previous implementation converted logits → softmax → embed_tokens.weight to create "soft embeddings" for MCMC. This is wrong because it collapses hidden_dim to an 11-dimensional simplex (12 vocab tokens), and feeds lm_head/energy_head inputs from a distribution they were never trained on. MCMC gradients must be taken w.r.t. transformer hidden states directly.
+### MCMC operates in hidden space (FIXED)
+MCMC gradients are taken w.r.t. transformer hidden states directly — the output of the URM recurrence loop. Both compute_joint_energy and lm_head expect hidden states; never convert to soft-embeddings (logits → softmax → embed_tokens). Previous implementation was buggy; now fixed.
 
-### Do not detach between MCMC steps during training
-The energy head must learn from multi-step MCMC trajectories. Calling `hidden.detach().requires_grad_(True)` inside the MCMC loop breaks the computational graph and limits learning to single-step gradient quality. Detach only at inference to save memory.
+### No detach between MCMC steps during training (FIXED)
+The energy head learns from multi-step MCMC trajectories via create_graph=True. Do not call `hidden.detach().requires_grad_(True)` inside the MCMC loop during training — this breaks the computational graph. Detach only at inference to save memory. Previous implementation was buggy; now fixed.
+
+### DSM (denoising score matching) is removed
+DSM was a dead end — unnecessary given tractable second-order gradients, and trains on the wrong distribution. The dsm_weight and dsm_noise_scales config fields have been removed. Use reconstruction-through-MCMC as the primary energy training signal.
 
 ### Dual reconstruction loss is mandatory with MCMC
 When training with MCMC refinement, compute reconstruction loss on BOTH unrefined logits (before MCMC) and refined logits (after MCMC). The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients. Refined-only loss destroys URM learning (confirmed in Exp 3a).

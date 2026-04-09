@@ -252,8 +252,28 @@ class EnergyLossHead(nn.Module):
             if k in outputs:
                 returned_outputs[k] = outputs[k].detach()
 
+        # Trajectory ranking loss
+        trajectory_loss_val = torch.tensor(0.0, device=labels.device)
+        if "trajectory" in outputs and self.model.config.trajectory_loss_weight > 0:
+            from models.trajectory_loss import trajectory_ranking_loss
+
+            trajectory_loss_val, traj_metrics = trajectory_ranking_loss(
+                energy_fn=self.model.compute_joint_energy,
+                trajectory=outputs["trajectory"],
+                input_embeddings=outputs["input_embeddings"].detach(),
+                labels=labels,
+                lm_head=self.model.inner.lm_head,
+                puzzle_emb_len=self.model.inner.puzzle_emb_len,
+                margin=self.model.config.trajectory_margin,
+                max_steps=self.model.config.trajectory_max_steps,
+            )
+            metrics.update(traj_metrics)
+        metrics["trajectory_loss_total"] = trajectory_loss_val.detach()
+
         contrastive_weight = self.model.config.contrastive_weight
-        total_loss = lm_loss + dsm_weight * dsm_loss_val + contrastive_weight * contrastive_loss
+        total_loss = (lm_loss + dsm_weight * dsm_loss_val
+                      + contrastive_weight * contrastive_loss
+                      + self.model.config.trajectory_loss_weight * trajectory_loss_val)
 
         return (
             new_carry,

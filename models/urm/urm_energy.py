@@ -54,6 +54,10 @@ class URMConfig(BaseModel):
     # Dual reconstruction loss weights (only used when MCMC active)
     unrefined_loss_weight: float = 0.5
     refined_loss_weight: float = 0.5
+    # Trajectory-supervised energy
+    trajectory_loss_weight: float = 0.0
+    trajectory_margin: float = 0.1
+    trajectory_max_steps: int = 4
 
 class URMBlock(nn.Module):
     def __init__(self, config: URMConfig) -> None:
@@ -161,12 +165,15 @@ class URM_Inner(nn.Module):
     def forward(
         self,
         carry: URMCarry,
-        batch: Dict[str, torch.Tensor]
+        batch: Dict[str, torch.Tensor],
+        capture_trajectory: bool = False,
     ) -> Tuple[URMCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         seq_info = dict(cos_sin=self.rotary_emb())
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
 
         hidden_states = carry.current_hidden
+        trajectory: List[torch.Tensor] = []
+
         if self.config.H_cycles > 1:
             with torch.no_grad():
                 for _ in range(self.config.H_cycles - 1):
@@ -174,15 +181,21 @@ class URM_Inner(nn.Module):
                         hidden_states = hidden_states + input_embeddings
                         for layer in self.layers:
                             hidden_states = layer(hidden_states=hidden_states, **seq_info)
+                        if capture_trajectory:
+                            trajectory.append(hidden_states.detach())
 
         for _ in range(self.config.L_cycles):
             hidden_states = hidden_states + input_embeddings
             for layer in self.layers:
                 hidden_states = layer(hidden_states=hidden_states, **seq_info)
+            if capture_trajectory:
+                trajectory.append(hidden_states.detach())
 
         new_carry = replace(carry, current_hidden=hidden_states.detach())
         output = self.lm_head(hidden_states)[:, self.puzzle_emb_len:]
         q_logits = self.q_head(hidden_states[:, 0]).to(torch.float32)
+        if capture_trajectory:
+            return new_carry, output, (q_logits[..., 0], q_logits[..., 1]), trajectory
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
 
@@ -247,7 +260,12 @@ class URM_Energy(nn.Module):
         }
 
         # 2. Run URM inner recurrence (the actual thinking)
-        new_carry_inner, logits, (q_halt_logits, q_continue_logits) = self.inner(new_carry, new_current_data)
+        capture = self.training and self.config.trajectory_loss_weight > 0
+        inner_result = self.inner(new_carry, new_current_data, capture_trajectory=capture)
+        if capture:
+            new_carry_inner, logits, (q_halt_logits, q_continue_logits), trajectory = inner_result
+        else:
+            new_carry_inner, logits, (q_halt_logits, q_continue_logits) = inner_result
 
         # 3. Compute energy on current output for stopping criterion
         input_embeddings = self.inner._input_embeddings(
@@ -312,6 +330,9 @@ class URM_Energy(nn.Module):
         }
         if unrefined_logits is not None:
             outputs["unrefined_logits"] = unrefined_logits
+        if capture:
+            outputs["trajectory"] = trajectory
+            outputs["input_embeddings"] = input_embeddings
 
         return (
             URMCarry(

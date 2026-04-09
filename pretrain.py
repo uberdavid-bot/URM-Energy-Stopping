@@ -578,6 +578,14 @@ def train_batch(
                 print(f"  MCMC improvement: {metrics['mcmc_improvement']:.4f}")
             if 'unrefined_accuracy' in metrics:
                 print(f"  Unrefined accuracy: {metrics['unrefined_accuracy']:.4f}")
+            if 'trajectory_loss_total' in metrics and metrics['trajectory_loss_total'] > 0:
+                print(f"  Trajectory loss: {metrics['trajectory_loss_total']:.4f}")
+            if 'trajectory_quality_first' in metrics:
+                print(f"  Trajectory quality first->last: {metrics['trajectory_quality_first']:.3f} -> {metrics['trajectory_quality_last']:.3f}")
+            if 'trajectory_energy_first' in metrics:
+                print(f"  Trajectory energy first->last: {metrics['trajectory_energy_first']:.3f} -> {metrics['trajectory_energy_last']:.3f}")
+            if 'trajectory_active_pairs' in metrics:
+                print(f"  Trajectory active pairs: {metrics['trajectory_active_pairs']:.0f}")
 
     should_step = train_state.accum_step % accum_steps == 0
     if not should_step:

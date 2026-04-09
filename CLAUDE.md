@@ -27,119 +27,83 @@ Do not assume a single grep caught everything.
 - For tasks touching >5 independent files, use subagents.
 - Flag architectural concerns when you see them. Propose fixes as separate tasks rather than silently expanding scope.
 
-# Project 
-# URM-Energy: Energy-Based Stopping for Universal Reasoning Models on ARC-AGI
+# Project Identity
 
-Fork of the [Universal Reasoning Model (URM)](https://github.com/UbiquantAI/URM) extended with an energy-based stopping mechanism as an alternative to Adaptive Computation Time (ACT).
+## What We're Building
+**Implicit vs Explicit Iterative Refinement for ARC-AGI**: a controlled comparison of URM recurrence (implicit energy minimization via shared-weight transformer passes) against EBT-style MCMC (explicit energy minimization via gradient descent on a learned energy function) for abstract reasoning.
 
-## Motivation
+The current project codebase is located at: https://github.com/uberdavid-bot/URM-Energy-Stopping
 
-The URM paper ([arXiv:2512.14693](https://arxiv.org/abs/2512.14693)) showed that recurrent inductive bias and strong nonlinearity are the key ingredients for reasoning on ARC-AGI, achieving 53.8% pass@1 on ARC-AGI 1. URM uses ACT (a learned halting probability) to decide when to stop iterating its recurrent computation.
+## One-Line Summary
+On discrete abstract reasoning tasks, does explicit energy minimization (MCMC in hidden space) offer measurable advantages over implicit iterative refinement (recurrent transformer passes), and under what conditions?
 
-This project replaces ACT with an **energy-based stopping criterion**. Instead of learning a binary "should I stop?" signal, we learn an energy function E(input, output) that scores prediction quality. This provides:
+## Research Goal
+Characterize the tradeoffs between implicit and explicit iterative refinement for ARC-AGI puzzle solving using a shared transformer backbone. URM recurrence and EBT-style MCMC are two mechanisms for iteratively improving predictions — this project determines when each has advantages and whether they are complementary or redundant.
 
-- **Principled stopping**: energy convergence rather than a learned halting head
-- **Built-in reranking**: energy score ranks predictions for pass@K (lower energy = more confident)
-- **Optional MCMC refinement**: gradient descent in output embedding space at inference (experimental)
+The specific hypotheses under test:
+1. **Explicit vs implicit refinement**: Given matched compute (N total steps), how does URM recurrence compare to MCMC gradient descent in hidden space?
+2. **Energy reranking**: Does a learned energy function E(input, hidden) provide a better confidence signal for pass@K reranking than Q-halt?
+3. **Energy-based stopping**: Is energy convergence a more principled stopping criterion than Q-halt, particularly for adaptive compute allocation?
+4. **Complementarity**: Can MCMC refinement improve predictions beyond what URM recurrence achieves when used as a second stage (hybrid architecture)?
 
-## What's Implemented
+## Hardware Environment
+Single NVIDIA RTX 3090 (24GB VRAM), home lab. All experiments must fit in this envelope. Training budget: 10K steps per experiment. Second-order gradients (create_graph=True) are tractable at this model scale. Target model: depth=2, hidden=64, ~130K transformer params on 10×10 grids.
 
-### New files
-- `models/urm/urm_energy.py` — Energy-based URM: inner recurrence + energy scoring + optional MCMC refinement
-- `models/dsm_loss.py` — Multi-scale Denoising Score Matching loss (for training energy gradients, optional)
-- `config/arch/urm_energy.yaml` — Hydra config with two modes: default and MCMC refinement
-- `config/arch/urm_energy_small.yaml` — Energy URM for 10x10 grids (matches urm_small arch, +129 params for energy head)
-- `config/arch/urm_energy_mcmc_small.yaml` — MCMC refinement with second-order gradients (mcmc_steps=4, create_graph=True)
-- `config/arch/urm_small.yaml` — Right-sized baseline URM for 10x10 grids (2 layers, hidden=128, 530K params)
-- `scripts/URM_energy_arcagi1.sh` — Launch script for energy experiments
-- `scripts/energy_small.sh` — Launch script for energy model on 10x10 grids (direct baseline comparison)
-- `scripts/energy_mcmc_small.sh` — Launch script for MCMC energy model on 10x10 grids
-- `scripts/baseline_small.sh` — Launch script for baseline URM on 10x10 grids
-- `tests/test_mcmc_inference.py` — Tests for losses, forward pass, energy halting, MCMC refinement, evaluator ranking
+## Success Criteria
+- **Minimum**: Clear characterization of when explicit energy helps vs. when implicit recurrence is sufficient. Energy reranking improves pass@K over Q-halt on matched architecture.
+- **Target**: Hybrid architecture (M URM + K MCMC steps) outperforms pure URM at matched total compute.
+- **Stretch**: Pure EBT (MCMC from input_embeddings, no URM steps) achieves non-trivial accuracy on ARC, demonstrating that energy gradients alone can drive abstract reasoning.
+- **Publishable result**: Controlled ablation comparing implicit vs explicit iterative refinement on discrete reasoning, with analysis of why each succeeds or fails, reproducible on consumer hardware.
 
-### Modified files
-- `models/losses.py` — EnergyLossHead: reconstruction + contrastive loss (+ optional DSM)
-- `evaluators/arc.py` — Energy-based reranking (`energy_pass@K` alongside q-based `pass@K`)
-- `pretrain.py` — Energy model forward pass and loss metric logging
+## Design Philosophy
+- **Shared backbone, isolated mechanism.** URM mode and EBT mode use the same transformer layers, embeddings, lm_head, and energy head. The only difference is the refinement step: transformer pass vs energy gradient step. This isolates the comparison.
+- **MCMC in hidden space.** Energy gradients operate on transformer hidden states directly — not soft-embedding space. The energy head and lm_head both expect hidden states; don't introduce distribution mismatches.
+- **Train and test the same way.** MCMC at inference requires create_graph=True during training. No detaching between MCMC steps during training.
+- **Right-size the model so it struggles.** The model must need most of its step budget to converge. If it plateaus in 1-2 steps, refinement has no room to help.
+- **Iterate fast at small scale.** 10×10 grids, ~130K params, 10K steps per experiment.
 
-## Architecture
+## Researcher Context
+Solo research project by David Colmenares (CMU Robotics PhD, Research Scientist at Meta). Running overnight experiments on a home 3090. The agent should optimize for autonomous reliability over cleverness. When in doubt, run the simpler experiment.
 
-### Training (default mode)
-```
-input → [URM inner: shared layer × H_cycles × L_cycles] → logits + hidden states
-                                                         → energy E(input, output_hidden)
-Loss = reconstruction(logits, labels) + contrastive_weight * contrastive(E)
-```
+## Key References
+- URM paper: arXiv:2512.14693 (Gao et al., 2024)
+- Energy-Based Transformers: arXiv:2507.02092 (Gladstone et al., 2025)
+- ARC-AGI: arcprize.org (Chollet, 2019)
 
-Two losses:
-- **Reconstruction**: standard LM loss on URM output logits — trains the main predictor
-- **Contrastive**: trains energy values so E(true) < E(predicted) - margin — for stopping and reranking
+## Doc Pointers
+- `docs_strategy.md` — Research direction, phasing, key decisions
+- `docs_architecture.md` — System design: URM mode, EBT mode, shared components
+- `docs_constraints.md` — Hardware limits, known failures, anti-patterns
+- `docs_hypotheses.md` — Experiment log (R1-R4 series)
 
-### Training (with MCMC refinement via second-order gradients)
-```
-input → [URM inner: shared layer × H_cycles × L_cycles] → initial logits
-      → convert to soft embeddings: softmax(logits) @ embed_tokens.weight
-      → MCMC loop (N steps, create_graph=True):
-            energy = E(input_emb, predicted_emb)
-            grad = ∇E w.r.t. predicted_emb (create_graph=True)
-            predicted_emb = predicted_emb - alpha * normalized_grad
-      → refined logits = lm_head(refined_emb)
-Loss = w_unrefined * recon(unrefined_logits) + w_refined * recon(refined_logits) + contrastive_weight * contrastive(E)
-```
+## Critical Implementation Notes
 
-**Dual reconstruction loss**: Loss is computed on BOTH unrefined and refined logits (default 0.5/0.5 weight). The unrefined loss gives the URM a clean learning signal independent of MCMC quality. The refined loss flows back through MCMC into the energy head via second-order gradients, teaching it to produce useful gradients. This prevents the failure mode where the URM learns to produce outputs only good *after* MCMC — early in training when MCMC is unreliable, the unrefined loss keeps the URM learning correctly.
+These are hard-won lessons. Violating any of these will waste experiment cycles.
 
-**Inference**: MCMC refinement at eval is disabled (`refine_steps: 0`) until the energy head is well-trained. Eval uses raw URM output, so pass@K reflects actual prediction quality. Re-enable once `mcmc_improvement` is consistently positive during training.
+### MCMC must operate in hidden space, not soft-embedding space
+The previous implementation converted logits → softmax → embed_tokens.weight to create "soft embeddings" for MCMC. This is wrong because it collapses hidden_dim to an 11-dimensional simplex (12 vocab tokens), and feeds lm_head/energy_head inputs from a distribution they were never trained on. MCMC gradients must be taken w.r.t. transformer hidden states directly.
 
-Contrastive loss is kept as auxiliary at reduced weight (0.5) for energy value separation.
+### Do not detach between MCMC steps during training
+The energy head must learn from multi-step MCMC trajectories. Calling `hidden.detach().requires_grad_(True)` inside the MCMC loop breaks the computational graph and limits learning to single-step gradient quality. Detach only at inference to save memory.
 
-### Training (with DSM, legacy approach)
-```
-Loss = reconstruction + contrastive + dsm_weight * DSM(energy_head)
-```
+### Dual reconstruction loss is mandatory with MCMC
+When training with MCMC refinement, compute reconstruction loss on BOTH unrefined logits (before MCMC) and refined logits (after MCMC). The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients. Refined-only loss destroys URM learning (confirmed in Exp 3a).
 
-DSM (Denoising Score Matching) trains energy *gradients* to point from corrupted toward clean outputs. This was the original approach for MCMC refinement at inference. Superseded by second-order gradient training. Enable with `dsm_weight: 1.0`.
+### Contrastive loss alone causes energy collapse
+Training the energy head with only contrastive loss (E(true) < E(predicted)) leads to trivial solutions where the energy gap collapses to zero. Use reconstruction-through-MCMC as the primary energy training signal.
 
-### Inference
-```
-input → [URM inner × T iterations] → energy E(input, output)
-                                    → stop when ΔE < threshold & steps >= min_steps
-                                    → rerank predictions by energy (lower = better)
-                                    → optional: refine_with_mcmc(logits, ∇E) if refine_steps > 0
-```
+### Right-size the model for the problem
+The model must need most of its step budget to converge. At hidden=128, the URM converges in 1-2 steps on 10×10 grids, leaving no room for refinement to help. Target: hidden=64, depth=2, where accuracy should meaningfully improve between steps 4 and 8.
 
-The outer loop calls forward() repeatedly. Energy convergence across iterations drives halting. The ARC evaluator reports both `pass@K` (q-based, baseline) and `energy_pass@K` (energy-ranked) for comparison.
+## Setup
 
-## Key Findings
-
-- **Contrastive loss trains energy separation**: E(true) vs E(predicted) gap enables both stopping and reranking
-- **DSM trains energy gradients (optional)**: Only needed for MCMC refinement; trains ∇E to point toward correct answers. Single gradient computation (O(1) cost), not O(steps) like MCMC backprop
-- **Model capacity mismatch**: Full URM architecture is overparameterized for 10×10 grids. Right-sizing needed.
-- **Energy reranking is free**: Once trained, energy scoring adds minimal compute but provides pass@K ranking
-
-## Reproduction
-
-### Setup
 ```bash
 conda create -n urm python=3.10
 conda activate urm
 pip install -r requirements.txt
-wandb login  # optional, for experiment tracking
 ```
 
-### Data preparation
-
-30x30 grids (full ARC, 960 tasks):
-```bash
-python -m data.build_arc_dataset \
-  --input-file-prefix kaggle/combined/arc-agi \
-  --output-dir data/arc1concept-aug-1000 \
-  --subsets training evaluation concept \
-  --test-set-name evaluation \
-  --num-aug 1000
-```
-
-10x10 grids (294/960 tasks, faster iteration):
+### Data preparation (10x10 grids)
 ```bash
 python -m data.build_arc_dataset \
   --input-file-prefix kaggle/combined/arc-agi \
@@ -150,133 +114,7 @@ python -m data.build_arc_dataset \
   --max-grid-size 10
 ```
 
-### Training (baseline URM on 10x10, right-sized)
-```bash
-bash scripts/baseline_small.sh
-# urm_small: 2 layers, hidden=128, 530K params + 33M puzzle_emb
-# 32000 epochs, eval every 2000, batch 512
-```
-
-### Training (energy URM on 10x10, matching baseline)
-```bash
-bash scripts/energy_small.sh
-# urm_energy_small: same arch as urm_small + 129-param energy head
-# 4000 epochs, eval every 200, batch 512, same hyperparams as baseline
-```
-
-### Training (energy-based URM on 30x30)
-```bash
-bash scripts/URM_energy_arcagi1.sh
-```
-
-### Training (energy URM with MCMC refinement on 10x10)
-```bash
-bash scripts/energy_mcmc_small.sh
-# urm_energy_mcmc_small: same arch + MCMC refinement (4 steps, create_graph=True)
-# 12000 epochs, eval every 600, batch 512, dual loss (0.5 unrefined + 0.5 refined)
-# Inference MCMC disabled (refine_steps=0) — eval uses raw URM output
-```
-
-### Training (with DSM refinement, legacy)
-```bash
-# Same as energy training, plus:
-#   arch.dsm_weight=1.0 arch.refine_steps=8 arch.refine_step_size=0.01
-```
-
 ### Running tests
 ```bash
 conda activate urm && python -m pytest tests/ -v
 ```
-
-## Status & Next Steps
-
-### Completed
-- [x] Energy-based stopping with energy convergence across outer loop iterations
-- [x] Contrastive loss for energy value separation (stopping + reranking)
-- [x] Energy-based reranking in ARC evaluator (energy_pass@K alongside pass@K)
-- [x] DSM training for energy head gradients (optional, for MCMC refinement)
-- [x] Inference-time MCMC refinement via refine_with_mcmc() (optional, off by default)
-- [x] Configurable loss weights and training modes
-- [x] Configurable grid size via --max-grid-size (10x10 dataset: 294/960 tasks, 1.15M samples)
-- [x] All bugfixes from previous rounds
-- [x] Right-sized baseline model (urm_small: 2 layers, hidden=128, 530K params, ~38 it/s on 3090)
-- [x] Fix evaluator _crop() for variable grid sizes (was hardcoded to 30x30)
-- [x] Energy small config + training script for direct baseline comparison (urm_energy_small, +129 params)
-- [x] Fixed-iteration eval: energy model uses same `loops` count as baseline during eval (energy convergence stopping only active during training)
-- [x] Safety cap (max_inference_steps=100) in evaluate() while loop
-- [x] Verified: eval completes in exactly 16 steps/batch, energy metrics + ARC/energy_pass@K flow to wandb
-- [x] MCMC refinement with second-order gradients: reconstruction loss flows back through MCMC into energy head
-- [x] MCMC training config (urm_energy_mcmc_small) and launch script (energy_mcmc_small.sh)
-- [x] MCMC improvement metrics (mcmc_improvement, unrefined_accuracy) in EnergyLossHead + pretrain.py logging
-- [x] Tests for MCMC training: creates_graph, energy_head_gets_gradients, improves_logits, eval_no_create_graph, disabled_by_default
-- [x] Fix: dual reconstruction loss on both unrefined and refined logits (prevents URM degradation from unreliable early MCMC)
-- [x] Configurable loss weights: unrefined_loss_weight, refined_loss_weight (default 0.5/0.5)
-- [x] Disable inference MCMC refinement (refine_steps=0) until energy head well-trained
-- [x] Dual loss metrics: unrefined_lm_loss, refined_lm_loss logged separately
-
-### Experimental Plan
-
-#### Experiment 1: Fixed iterations, energy reranking vs Q-halt reranking (current)
-Both models run the same number of inner loop iterations (`loops=16`). The only difference is how pass@K predictions are ranked:
-- **Baseline (urm_small)**: Q-halt head ranks predictions (learned halting probability as confidence)
-- **Energy (urm_energy_small)**: Energy function ranks predictions (lower energy = more confident)
-- Both `ARC/pass@K` (Q-based) and `ARC/energy_pass@K` (energy-based) are reported for the energy model
-- Energy convergence stopping is disabled during eval — both models use identical fixed iterations
-
-Steps:
-1. **Run baseline URM** on 10x10 (`bash scripts/baseline_small.sh`) — establish ACT pass@K — **RUNNING**
-2. **Run energy URM** on 10x10 (`bash scripts/energy_small.sh`) — compare energy_pass@K vs pass@K — **READY**
-
-#### Experiment 2: Adaptive stopping comparison (future)
-Compare energy convergence stopping vs ACT halting, with matched total compute budget.
-
-#### Experiment 3: MCMC refinement with second-order gradients (current)
-Core thesis: EBT-style MCMC refinement on a small recurrent model. URM inner recurrence produces initial prediction, then MCMC steps refine it by descending the energy gradient in output embedding space. Second-order gradients through the MCMC steps train the energy head to produce gradients that actually improve predictions.
-
-Three-way comparison (all on 10x10 grids):
-- **Baseline (urm_small)**: Q-halt head ranks predictions, no energy
-- **Energy reranking (urm_energy_small)**: Energy function ranks predictions, no MCMC
-- **Energy MCMC (urm_energy_mcmc_small)**: Energy MCMC refines predictions + energy reranking
-
-Key design decisions:
-- **Dual reconstruction loss**: Loss computed on both unrefined (clean URM signal) and refined (energy head training signal) logits, weighted 0.5/0.5. This prevents the URM from degrading when MCMC is unreliable early in training.
-- **Inference MCMC disabled**: `refine_steps=0` until energy head produces consistently positive `mcmc_improvement`. Eval uses raw URM output so pass@K reflects actual prediction quality.
-- Contrastive loss kept as auxiliary (weight=0.5) for energy value separation
-- `mcmc_training=True` enables `create_graph=True` during training; eval uses `create_graph=False`
-
-Metrics to watch:
-- `unrefined_lm_loss`: should decrease steadily (clean URM learning)
-- `refined_lm_loss`: may start high, should decrease as energy head improves
-- `mcmc_improvement`: negative early (MCMC hurts), should trend toward positive
-- `unrefined_accuracy`: should track close to non-MCMC energy model
-
-Steps:
-1. **Run MCMC energy URM** on 10x10 (`bash scripts/energy_mcmc_small.sh`) — **READY**
-2. Compare `energy_pass@K` across all three models
-3. Monitor `mcmc_improvement` — once consistently positive, re-enable `refine_steps: 4` for inference
-
-#### Experiment 4: Ablations (future)
-- +N MCMC refinement steps vs +N extra URM passes
-- Tune contrastive_margin and contrastive_weight
-- Scale to 30×30 grids once 10×10 pipeline validated
-
-### Model configs
-| Config | Layers | Hidden | Heads | Params | Speed (3090) | Data |
-|--------|--------|--------|-------|--------|-------------|------|
-| urm_small | 2 | 128 | 4 | 530K (+33M puzzle_emb) | ~38 it/s | 10x10 |
-| urm_energy_small | 2 | 128 | 4 | 531K (+33M puzzle_emb) | ~3.5 it/s | 10x10 |
-| urm_energy_mcmc_small | 2 | 128 | 4 | 531K (+33M puzzle_emb) | TBD | 10x10 |
-| urm | 8 | 512 | 8 | ~40M (+33M puzzle_emb) | ~2 it/s | 30x30 |
-
-Note: `eval_interval` is in *epochs* not steps. Each epoch = ~294 puzzle groups (~40 steps, ~1 min) at batch_size=32 on the 10x10 dataset.
-
-## References
-
-- [Universal Reasoning Model (URM)](https://arxiv.org/abs/2512.14693) — Gao et al., 2024
-- [Energy-Based Transformers](https://arxiv.org/abs/2410.09197) — Hoover et al., 2024
-- [Denoising Score Matching](https://www.iro.umontreal.ca/~vin101/publications/smdae_techreport.pdf) — Vincent, 2011
-- [ARC-AGI](https://arcprize.org/) — Chollet, 2019
-
-## License
-
-Same as the original URM repository.

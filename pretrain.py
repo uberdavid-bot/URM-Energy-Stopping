@@ -130,7 +130,7 @@ class PretrainConfig(pydantic.BaseModel):
     eval_interval: Optional[int] = None
     eval_save_outputs: List[str] = []
 
-    loop_deltas: List[str] = []
+    loop_deltas: List[int] = []
 
     ema: bool = False
     ema_rate: float = 0.999

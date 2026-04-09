@@ -35,8 +35,8 @@ class URMConfig(BaseModel):
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
     loops: int
-    L_cycles: int
-    H_cycles: int
+    L_cycles: int = 1
+    H_cycles: int = 1
     forward_dtype: str = "bfloat16"
     # Energy-specific
     energy_threshold: float = 0.005
@@ -174,17 +174,7 @@ class URM_Inner(nn.Module):
         hidden_states = carry.current_hidden
         trajectory: List[torch.Tensor] = []
 
-        if self.config.H_cycles > 1:
-            with torch.no_grad():
-                for _ in range(self.config.H_cycles - 1):
-                    for _ in range(self.config.L_cycles):
-                        hidden_states = hidden_states + input_embeddings
-                        for layer in self.layers:
-                            hidden_states = layer(hidden_states=hidden_states, **seq_info)
-                        if capture_trajectory:
-                            trajectory.append(hidden_states.detach())
-
-        for _ in range(self.config.L_cycles):
+        for _ in range(self.config.loops):
             hidden_states = hidden_states + input_embeddings
             for layer in self.layers:
                 hidden_states = layer(hidden_states=hidden_states, **seq_info)

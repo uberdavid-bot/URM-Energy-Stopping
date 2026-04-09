@@ -559,7 +559,7 @@ class TestMCMCTraining:
 class TestTrajectoryCapture:
     def test_trajectory_capture(self):
         """Forward with trajectory_loss_weight > 0 should return trajectory in outputs."""
-        config = make_config(trajectory_loss_weight=1.0, trajectory_margin=0.1, H_cycles=2, L_cycles=4)
+        config = make_config(trajectory_loss_weight=1.0, trajectory_margin=0.1, loops=8)
         model = URM_Energy(config).to(DEVICE).train()
 
         batch = make_batch(config)
@@ -569,8 +569,7 @@ class TestTrajectoryCapture:
 
         assert "trajectory" in outputs, "trajectory missing from outputs"
         trajectory = outputs["trajectory"]
-        # H_cycles=2, L_cycles=4 → (2-1)*4 + 4 = 8 steps
-        expected_steps = (config["H_cycles"] - 1) * config["L_cycles"] + config["L_cycles"]
+        expected_steps = config["loops"]
         assert len(trajectory) == expected_steps, (
             f"Expected {expected_steps} trajectory steps, got {len(trajectory)}"
         )
@@ -677,7 +676,7 @@ class TestTrajectoryRankingLoss:
         """
         from models.trajectory_loss import trajectory_ranking_loss
 
-        config = make_config(trajectory_loss_weight=1.0, trajectory_margin=0.1, H_cycles=2, L_cycles=2)
+        config = make_config(trajectory_loss_weight=1.0, trajectory_margin=0.1, loops=4)
         model = URM_Energy(config).to(DEVICE).train()
 
         batch = make_batch(config)
@@ -718,7 +717,7 @@ class TestTrajectoryRankingLoss:
 
         config = make_config(
             trajectory_loss_weight=1.0, trajectory_margin=0.1,
-            H_cycles=2, L_cycles=2,
+            loops=4,
             contrastive_weight=0.5, dsm_weight=0.0,
         )
         model = URM_Energy(config).to(DEVICE).train()

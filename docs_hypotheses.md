@@ -18,13 +18,22 @@ See `docs_hypotheses_archived.md` for full details of prior experiments.
 ## New Experiment Series — Implicit vs Explicit Iterative Refinement
 
 ### Experiment R1 — Right-sized baseline (find the scale)
-Date: TBD
+
+**R1a — hidden=64** (too small)
+Date: 2026-04-09
 Script: `scripts/train_r1_scale.sh`
 Config: `config/arch/urm_energy_r1.yaml` — depth=2, hidden=64, 4 heads, 8 recurrence steps, expansion=4, H_cycles=1, L_cycles=1, mode="urm", puzzle_emb_ndim=64, batch 512, 10×10 grids, ~10K training steps (4000 epochs), 5 eval checkpoints (every 800 epochs), lr=3e-4, stablemax_cross_entropy, bfloat16, EMA 0.999.
-Hypothesis: Reducing hidden from 128 to 64 (~4x fewer transformer params) will make the model need most of its 8 steps to converge on 10×10 grids, providing headroom for refinement experiments.
-Expected outcome: Per-step accuracy (step_1_accuracy..step_8_accuracy) should show meaningful improvement between steps 4 and 8. If the model plateaus by step 2-3 (as with hidden=128), we need to go smaller (hidden=48 or hidden=32).
-Key measurements: per-step accuracy curve (logged to wandb), total VRAM usage, throughput (it/s), pass@K at 10K steps.
-Risk: hidden=64 may be too small for the transformer to learn ARC patterns at all, or too large and still converges fast.
+
+Result: **0.6% pass@1** — model too small to learn ARC patterns on 10×10 grids. ~130K transformer params insufficient for the task. Need to increase hidden size.
+
+**R1b — hidden=96** (next trial)
+Date: TBD
+Script: `scripts/train_r1_h96.sh`
+Config: `config/arch/urm_r1_h96.yaml` — depth=2, hidden=96, 4 heads (head_dim=24), 8 recurrence steps, expansion=4, puzzle_emb_ndim=96, otherwise same as R1a. ~300K transformer params — between h64 (too small) and h128 (converges too fast, 15.9% composite from Exp 0).
+Hypothesis: hidden=96 provides enough capacity to learn ARC patterns while still needing most of the 8-step budget. If it converges in 1-2 steps like h128, we have our answer: the sweet spot is closer to h64 and the problem is capacity, not convergence speed.
+Expected outcome: Per-step accuracy should show meaningful improvement between steps 4 and 8. pass@1 should be significantly above 0.6%.
+Key measurements: per-step accuracy curve, pass@K, VRAM, throughput.
+Risk: h96 may still converge too fast (like h128), or still be too small (like h64).
 
 ### Result
 TBD

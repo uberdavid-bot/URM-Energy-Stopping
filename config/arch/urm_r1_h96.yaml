@@ -1,0 +1,32 @@
+# Experiment R1 (h96): Scale search — hidden=64 was too small (0.6% pass@1)
+# depth=2, hidden=96, 8 recurrence steps, 10x10 grids
+# ~300K transformer params (vs ~130K at h64, ~500K at h128)
+
+name: urm.urm_energy@URM_Energy
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+
+loops: 8
+num_layers: 2
+hidden_size: 96
+num_heads: 4
+expansion: 4
+
+H_cycles: 1
+L_cycles: 1
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+# Energy stopping
+energy_threshold: 0.005
+min_steps: 8
+
+# Pure URM mode — no MCMC
+mode: urm
+mcmc_steps: 0
+mcmc_training: false
+
+ema: True
+ema_rate: 0.999

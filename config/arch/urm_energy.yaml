@@ -19,10 +19,6 @@ pos_encodings: rope
 # Energy-specific
 energy_threshold: 0.005
 min_steps: 8
-contrastive_weight: 1.0
-contrastive_margin: 0.5
-refine_steps: 0
-refine_step_size: 0.01
 
 # Enable timing profile output during training for debugging
 profile: false

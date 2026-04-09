@@ -1,5 +1,5 @@
 """
-Tests for URM_Energy architecture: energy head, MCMC refinement, trajectory supervision.
+Tests for URM_Energy architecture: energy head, MCMC refinement.
 
 Requires CUDA — runs real flash_attn and model code on GPU.
 """
@@ -259,61 +259,6 @@ class TestRotaryEmbeddingLength:
         assert rotary_len == expected_len
 
 
-class TestContrastiveLoss:
-    def test_contrastive_loss_active_when_gap_insufficient(self):
-        """Contrastive loss should be positive when E(true) > E(predicted) - margin."""
-        config = make_config()
-        model = URM_Energy(config).to(DEVICE).train()
-
-        B, S, H = 2, config["seq_len"], config["hidden_size"]
-        dtype = model.inner.forward_dtype
-        input_emb = torch.randn(B, S, H, dtype=dtype, device=DEVICE)
-        output_emb = torch.randn(B, S, H, dtype=dtype, device=DEVICE)
-
-        true_energy = model.compute_joint_energy(input_emb.detach(), output_emb.detach())
-        predicted_energy = model.compute_joint_energy(input_emb.detach(), output_emb.detach())
-
-        margin = 0.5
-        loss = torch.relu(true_energy - predicted_energy + margin).mean()
-
-        # With same embeddings, true_energy == predicted_energy, so loss = relu(0 + 0.5) = 0.5
-        assert loss.item() > 0, "Contrastive loss should be active when margin not satisfied"
-
-    def test_contrastive_loss_zero_when_gap_sufficient(self):
-        """Contrastive loss should be zero when E(true) << E(predicted) by margin."""
-        # Manually construct: true_energy = -10, predicted_energy = 10, margin = 0.5
-        # loss = relu(-10 - 10 + 0.5) = relu(-19.5) = 0
-        true_energy = torch.tensor([-10.0], device=DEVICE)
-        predicted_energy = torch.tensor([10.0], device=DEVICE)
-        margin = 0.5
-        loss = torch.relu(true_energy - predicted_energy + margin).mean()
-        assert loss.item() == 0.0
-
-    def test_contrastive_backward(self):
-        """Contrastive loss should contribute gradients to energy_head when margin is active."""
-        config = make_config()
-        model = URM_Energy(config).to(DEVICE).train()
-
-        batch = make_batch(config)
-        carry = make_carry(model, batch)
-        _, outputs = model(carry, batch)
-
-        input_emb = model.inner._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
-        labels = batch["labels"]
-        true_emb = model.inner.embed_tokens(labels.clamp(min=0))
-        true_emb = model.inner.embed_scale * true_emb
-
-        # Use large margin to ensure loss is active with random weights
-        true_energy = model.compute_joint_energy(input_emb.detach(), true_emb.detach())
-        predicted_energy = outputs["current_energy"]
-        contrastive_loss = torch.relu(true_energy - predicted_energy + 100.0).mean()
-
-        contrastive_loss.backward()
-
-        assert model.energy_head.weight.grad is not None
-        assert model.energy_head.weight.grad.abs().sum() > 0
-
-
 class TestEnergyInOutputs:
     def test_current_energy_in_outputs(self):
         """current_energy must be in outputs with shape [batch_size]."""
@@ -437,7 +382,6 @@ class TestMCMCTraining:
         """Dual loss should give gradients to URM layers (unrefined) and energy_head (refined)."""
         config = make_config(
             mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True,
-            unrefined_loss_weight=0.5, refined_loss_weight=0.5,
         )
         model = URM_Energy(config).to(DEVICE).train()
 
@@ -469,170 +413,12 @@ class TestMCMCTraining:
         assert model.energy_head.weight.grad.abs().sum() > 0, "energy_head gradients are zero"
 
 
-class TestTrajectoryCapture:
-    def test_trajectory_capture(self):
-        """Forward with trajectory_loss_weight > 0 should return trajectory in outputs."""
-        config = make_config(trajectory_loss_weight=1.0, trajectory_margin=0.1, loops=8)
-        model = URM_Energy(config).to(DEVICE).train()
-
-        batch = make_batch(config)
-        carry = make_carry(model, batch)
-
-        _, outputs = model(carry, batch)
-
-        assert "trajectory" in outputs, "trajectory missing from outputs"
-        trajectory = outputs["trajectory"]
-        expected_steps = config["loops"]
-        assert len(trajectory) == expected_steps, (
-            f"Expected {expected_steps} trajectory steps, got {len(trajectory)}"
-        )
-        for i, h in enumerate(trajectory):
-            expected_shape = (config["batch_size"], config["seq_len"], config["hidden_size"])
-            assert h.shape == expected_shape, (
-                f"Trajectory step {i} shape {h.shape} != expected {expected_shape}"
-            )
-
-    def test_trajectory_not_captured_when_disabled(self):
-        """Forward with trajectory_loss_weight=0 should not capture trajectory."""
-        config = make_config(trajectory_loss_weight=0.0)
-        model = URM_Energy(config).to(DEVICE).train()
-
-        batch = make_batch(config)
-        carry = make_carry(model, batch)
-
-        _, outputs = model(carry, batch)
-
-        assert "trajectory" not in outputs
-
-    def test_trajectory_not_captured_at_eval(self):
-        """Eval mode should not capture trajectory even with trajectory_loss_weight > 0."""
-        config = make_config(trajectory_loss_weight=1.0, trajectory_margin=0.1)
-        model = URM_Energy(config).to(DEVICE).eval()
-
-        batch = make_batch(config)
-        carry = make_carry(model, batch)
-
-        with torch.no_grad():
-            _, outputs = model(carry, batch)
-
-        assert "trajectory" not in outputs
-
-
-class TestTrajectoryRankingLoss:
-    def test_trajectory_quality_ordering(self):
-        """Loss should be non-zero when energy ordering disagrees with quality ordering."""
-        from models.trajectory_loss import trajectory_ranking_loss
-
-        config = make_config(trajectory_loss_weight=1.0, trajectory_margin=0.1)
-        model = URM_Energy(config).to(DEVICE).train()
-
-        batch = make_batch(config)
-        B, S, H = config["batch_size"], config["seq_len"], config["hidden_size"]
-        dtype = model.inner.forward_dtype
-        puzzle_emb_len = model.inner.puzzle_emb_len
-
-        # Create trajectory with 3 steps — energy head is random, so ordering
-        # likely disagrees with quality ordering → loss should be non-zero
-        trajectory = [
-            torch.randn(B, S + puzzle_emb_len, H, dtype=dtype, device=DEVICE)
-            for _ in range(3)
-        ]
-        input_emb = torch.randn(B, S + puzzle_emb_len, H, dtype=dtype, device=DEVICE)
-
-        loss, metrics = trajectory_ranking_loss(
-            energy_fn=model.compute_joint_energy,
-            trajectory=trajectory,
-            input_embeddings=input_emb,
-            labels=batch["labels"],
-            lm_head=model.inner.lm_head,
-            puzzle_emb_len=puzzle_emb_len,
-            margin=0.1,
-        )
-
-        assert loss.grad_fn is not None, "Trajectory loss should be differentiable"
-        assert "trajectory_steps" in metrics
-        assert metrics["trajectory_steps"].item() == 3
-
-    def test_trajectory_single_step_returns_zero(self):
-        """With only 1 trajectory step, loss should be zero (no pairs)."""
-        from models.trajectory_loss import trajectory_ranking_loss
-
-        config = make_config()
-        model = URM_Energy(config).to(DEVICE).train()
-        batch = make_batch(config)
-
-        B, S, H = config["batch_size"], config["seq_len"], config["hidden_size"]
-        dtype = model.inner.forward_dtype
-        puzzle_emb_len = model.inner.puzzle_emb_len
-
-        trajectory = [torch.randn(B, S + puzzle_emb_len, H, dtype=dtype, device=DEVICE)]
-        input_emb = torch.randn(B, S + puzzle_emb_len, H, dtype=dtype, device=DEVICE)
-
-        loss, metrics = trajectory_ranking_loss(
-            energy_fn=model.compute_joint_energy,
-            trajectory=trajectory,
-            input_embeddings=input_emb,
-            labels=batch["labels"],
-            lm_head=model.inner.lm_head,
-            puzzle_emb_len=puzzle_emb_len,
-        )
-
-        assert loss.item() == 0.0
-        assert metrics == {}
-
-    def test_trajectory_loss_gradients(self):
-        """Trajectory loss should give gradients to energy_head.
-
-        Note: URM inner layers also get gradients because compute_joint_energy
-        re-runs the transformer layers. The key property is that trajectory
-        hidden states are detached — no gradients flow through the URM recurrence.
-        """
-        from models.trajectory_loss import trajectory_ranking_loss
-
-        config = make_config(trajectory_loss_weight=1.0, trajectory_margin=0.1, loops=4)
-        model = URM_Energy(config).to(DEVICE).train()
-
-        batch = make_batch(config)
-        carry = make_carry(model, batch)
-
-        _, outputs = model(carry, batch)
-
-        assert "trajectory" in outputs
-
-        # Verify trajectory hidden states are detached
-        for h in outputs["trajectory"]:
-            assert not h.requires_grad, "Trajectory hidden states should be detached"
-
-        loss, _ = trajectory_ranking_loss(
-            energy_fn=model.compute_joint_energy,
-            trajectory=outputs["trajectory"],
-            input_embeddings=outputs["input_embeddings"].detach(),
-            labels=batch["labels"],
-            lm_head=model.inner.lm_head,
-            puzzle_emb_len=model.inner.puzzle_emb_len,
-            margin=0.1,
-        )
-
-        model.zero_grad()
-        loss.backward()
-
-        # Energy head should get gradients
-        assert model.energy_head.weight.grad is not None, (
-            "energy_head has no gradients from trajectory loss"
-        )
-        assert model.energy_head.weight.grad.abs().sum() > 0, (
-            "energy_head gradients are zero"
-        )
-
-    def test_trajectory_loss_head_integration(self):
-        """EnergyLossHead should include trajectory loss in total when trajectory_loss_weight > 0."""
+class TestEnergyLossHeadIntegration:
+    def test_loss_head_produces_valid_loss(self):
+        """EnergyLossHead should produce positive, differentiable reconstruction loss."""
         from models.losses import EnergyLossHead
 
-        config = make_config(
-            trajectory_loss_weight=1.0, trajectory_margin=0.1,
-            loops=4,
-            contrastive_weight=0.5,
-        )
+        config = make_config(loops=4)
         model = URM_Energy(config).to(DEVICE).train()
         loss_head = EnergyLossHead(model, "stablemax_cross_entropy").to(DEVICE)
 
@@ -644,12 +430,11 @@ class TestTrajectoryRankingLoss:
             return_keys=[], carry=carry, batch=batch
         )
 
-        assert "trajectory_loss_total" in metrics
+        assert "reconstruction_loss" in metrics
         assert loss.item() > 0
         assert loss.grad_fn is not None
 
         loss.backward()
-        assert model.energy_head.weight.grad is not None
 
 
 if __name__ == "__main__":

@@ -557,14 +557,8 @@ def train_batch(
             print(f"\nStep {train_state.step}:")
             if 'reconstruction_loss' in metrics:
                 print(f"  Reconstruction loss: {metrics['reconstruction_loss']:.4f}")
-            if 'contrastive_loss' in metrics:
-                print(f"  Contrastive loss: {metrics['contrastive_loss']:.4f}")
-            if 'true_energy' in metrics:
-                print(f"  True energy: {metrics['true_energy']:.4f}")
-            if 'predicted_energy' in metrics:
-                print(f"  Predicted energy: {metrics['predicted_energy']:.4f}")
-            if 'energy_gap' in metrics:
-                print(f"  Energy gap (pred-true): {metrics['energy_gap']:.4f}")
+            if 'current_energy' in metrics:
+                print(f"  Energy: {metrics['current_energy']:.4f}")
             if 'unrefined_lm_loss' in metrics:
                 print(f"  Unrefined LM loss: {metrics['unrefined_lm_loss']:.4f}")
             if 'refined_lm_loss' in metrics:
@@ -573,14 +567,6 @@ def train_batch(
                 print(f"  MCMC improvement: {metrics['mcmc_improvement']:.4f}")
             if 'unrefined_accuracy' in metrics:
                 print(f"  Unrefined accuracy: {metrics['unrefined_accuracy']:.4f}")
-            if 'trajectory_loss_total' in metrics and metrics['trajectory_loss_total'] > 0:
-                print(f"  Trajectory loss: {metrics['trajectory_loss_total']:.4f}")
-            if 'trajectory_quality_first' in metrics:
-                print(f"  Trajectory quality first->last: {metrics['trajectory_quality_first']:.3f} -> {metrics['trajectory_quality_last']:.3f}")
-            if 'trajectory_energy_first' in metrics:
-                print(f"  Trajectory energy first->last: {metrics['trajectory_energy_first']:.3f} -> {metrics['trajectory_energy_last']:.3f}")
-            if 'trajectory_active_pairs' in metrics:
-                print(f"  Trajectory active pairs: {metrics['trajectory_active_pairs']:.0f}")
 
     should_step = train_state.accum_step % accum_steps == 0
     if not should_step:

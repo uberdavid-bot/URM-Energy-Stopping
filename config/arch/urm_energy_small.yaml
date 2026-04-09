@@ -1,5 +1,4 @@
-# Energy-based URM: reconstruction + contrastive loss
-# Energy function provides stopping criterion and pass@K reranking
+# Energy-based URM: reconstruction loss + energy stopping/reranking
 
 name: urm.urm_energy@URM_Energy
 loss:
@@ -21,14 +20,6 @@ pos_encodings: rope
 # Energy stopping
 energy_threshold: 0.005
 min_steps: 8
-
-# Loss weights
-contrastive_weight: 1.0
-contrastive_margin: 0.5
-
-# MCMC refinement (disabled)
-refine_steps: 0
-refine_step_size: 0.01
 
 ema: True
 ema_rate: 0.999

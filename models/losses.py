@@ -192,38 +192,15 @@ class EnergyLossHead(nn.Module):
 
         if "unrefined_logits" in outputs:
             refined_lm_loss = (self.loss_fn(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
-            w_unrefined = self.model.config.unrefined_loss_weight
-            w_refined = self.model.config.refined_loss_weight
-            lm_loss = w_unrefined * unrefined_lm_loss + w_refined * refined_lm_loss
+            lm_loss = 0.5 * unrefined_lm_loss + 0.5 * refined_lm_loss
             metrics["unrefined_lm_loss"] = unrefined_lm_loss.detach()
             metrics["refined_lm_loss"] = refined_lm_loss.detach()
         else:
             lm_loss = unrefined_lm_loss
 
-        # Embed inputs and true targets for contrastive loss
-        input_embeddings = self.model.inner._input_embeddings(
-            new_carry.current_data["inputs"],
-            new_carry.current_data["puzzle_identifiers"]
-        )
-        true_embeddings = self.model.inner.embed_tokens(labels.clamp(min=0))
-        true_embeddings = true_embeddings * mask.unsqueeze(-1).float()
-        true_embeddings = self.model.inner.embed_scale * true_embeddings
-
-        # Contrastive loss: E(true) should be lower than E(predicted) by margin
-        true_energy = self.model.compute_joint_energy(
-            input_embeddings.detach(), true_embeddings.detach()
-        )
-        predicted_energy = outputs["current_energy"]
-        margin = self.model.config.contrastive_margin
-        contrastive_loss = F.relu(true_energy - predicted_energy + margin).mean()
-
         metrics.update({
             "reconstruction_loss": lm_loss.detach(),
-            "contrastive_loss": contrastive_loss.detach(),
             "current_energy": outputs["current_energy"].mean().detach(),
-            "true_energy": true_energy.mean().detach(),
-            "predicted_energy": predicted_energy.mean().detach(),
-            "energy_gap": (predicted_energy - true_energy).mean().detach(),
         })
 
         if profile is not None:
@@ -237,32 +214,9 @@ class EnergyLossHead(nn.Module):
             if k in outputs:
                 returned_outputs[k] = outputs[k].detach()
 
-        # Trajectory ranking loss
-        trajectory_loss_val = torch.tensor(0.0, device=labels.device)
-        if "trajectory" in outputs and self.model.config.trajectory_loss_weight > 0:
-            from models.trajectory_loss import trajectory_ranking_loss
-
-            trajectory_loss_val, traj_metrics = trajectory_ranking_loss(
-                energy_fn=self.model.compute_joint_energy,
-                trajectory=outputs["trajectory"],
-                input_embeddings=outputs["input_embeddings"].detach(),
-                labels=labels,
-                lm_head=self.model.inner.lm_head,
-                puzzle_emb_len=self.model.inner.puzzle_emb_len,
-                margin=self.model.config.trajectory_margin,
-                max_steps=self.model.config.trajectory_max_steps,
-            )
-            metrics.update(traj_metrics)
-        metrics["trajectory_loss_total"] = trajectory_loss_val.detach()
-
-        contrastive_weight = self.model.config.contrastive_weight
-        total_loss = (lm_loss
-                      + contrastive_weight * contrastive_loss
-                      + self.model.config.trajectory_loss_weight * trajectory_loss_val)
-
         return (
             new_carry,
-            total_loss,
+            lm_loss,
             metrics,
             returned_outputs,
             new_carry.halted.all(),

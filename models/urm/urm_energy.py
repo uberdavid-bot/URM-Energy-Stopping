@@ -41,21 +41,10 @@ class URMConfig(BaseModel):
     # Energy-specific
     energy_threshold: float = 0.005
     min_steps: int = 8
-    contrastive_weight: float = 1.0
-    contrastive_margin: float = 0.5
-    refine_steps: int = 0
-    refine_step_size: float = 0.01
     # MCMC training (second-order gradients through MCMC into energy head)
     mcmc_steps: int = 0
     mcmc_step_size: float = 0.01
     mcmc_training: bool = False
-    # Dual reconstruction loss weights (only used when MCMC active)
-    unrefined_loss_weight: float = 0.5
-    refined_loss_weight: float = 0.5
-    # Trajectory-supervised energy
-    trajectory_loss_weight: float = 0.0
-    trajectory_margin: float = 0.1
-    trajectory_max_steps: int = 4
 
 class URMBlock(nn.Module):
     def __init__(self, config: URMConfig) -> None:
@@ -248,12 +237,9 @@ class URM_Energy(nn.Module):
         }
 
         # 2. Run URM inner recurrence (the actual thinking)
-        capture = self.training and self.config.trajectory_loss_weight > 0
-        inner_result = self.inner(new_carry, new_current_data, capture_trajectory=capture)
-        if capture:
-            new_carry_inner, logits, (q_halt_logits, q_continue_logits), trajectory = inner_result
-        else:
-            new_carry_inner, logits, (q_halt_logits, q_continue_logits) = inner_result
+        new_carry_inner, logits, (q_halt_logits, q_continue_logits) = self.inner(
+            new_carry, new_current_data
+        )
 
         # 3. Compute energy on current output for stopping criterion
         input_embeddings = self.inner._input_embeddings(
@@ -311,9 +297,6 @@ class URM_Energy(nn.Module):
         }
         if unrefined_logits is not None:
             outputs["unrefined_logits"] = unrefined_logits
-        if capture:
-            outputs["trajectory"] = trajectory
-            outputs["input_embeddings"] = input_embeddings
 
         return (
             URMCarry(

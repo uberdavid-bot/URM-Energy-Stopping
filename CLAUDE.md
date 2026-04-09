@@ -86,14 +86,11 @@ MCMC gradients are taken w.r.t. transformer hidden states directly — the outpu
 ### No detach between MCMC steps during training (FIXED)
 The energy head learns from multi-step MCMC trajectories via create_graph=True. Do not call `hidden.detach().requires_grad_(True)` inside the MCMC loop during training — this breaks the computational graph. Detach only at inference to save memory. Previous implementation was buggy; now fixed.
 
-### DSM (denoising score matching) is removed
-DSM was a dead end — unnecessary given tractable second-order gradients, and trains on the wrong distribution. The dsm_weight and dsm_noise_scales config fields have been removed. Use reconstruction-through-MCMC as the primary energy training signal.
-
 ### Dual reconstruction loss is mandatory with MCMC
-When training with MCMC refinement, compute reconstruction loss on BOTH unrefined logits (before MCMC) and refined logits (after MCMC). The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients. Refined-only loss destroys URM learning (confirmed in Exp 3a).
+When training with MCMC refinement, compute reconstruction loss on BOTH unrefined logits (before MCMC) and refined logits (after MCMC), weighted 0.5/0.5. The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients. Refined-only loss destroys URM learning (confirmed in Exp 3a).
 
-### Contrastive loss alone causes energy collapse
-Training the energy head with only contrastive loss (E(true) < E(predicted)) leads to trivial solutions where the energy gap collapses to zero. Use reconstruction-through-MCMC as the primary energy training signal.
+### Legacy code removed
+DSM (denoising score matching), contrastive loss, and trajectory supervision have been removed. DSM was unnecessary given tractable second-order gradients. Contrastive-only loss caused energy collapse. Trajectory supervision is a future Phase 4 extension. The only energy training signal is reconstruction-through-MCMC (dual loss). Deleted files: `models/dsm_loss.py`, `models/trajectory_loss.py`, and their associated configs/scripts.
 
 ### Right-size the model for the problem
 The model must need most of its step budget to converge. At hidden=128, the URM converges in 1-2 steps on 10×10 grids, leaving no room for refinement to help. Target: hidden=64, depth=2, where accuracy should meaningfully improve between steps 4 and 8.

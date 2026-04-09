@@ -100,8 +100,11 @@ DSM (denoising score matching), contrastive loss, and trajectory supervision hav
 
 EBT and hybrid modes always halt after one forward() call (all compute happens in that call). Both use dual reconstruction loss (unrefined + refined) when training.
 
+### Per-step accuracy logging
+At eval time, URM mode captures logits at every recurrence step. EnergyLossHead computes `step_k_accuracy` metrics for each step k=1..loops, logged to wandb. Use this to determine at which step the model's predictions plateau — critical for right-sizing the model.
+
 ### Right-size the model for the problem
-The model must need most of its step budget to converge. At hidden=128, the URM converges in 1-2 steps on 10×10 grids, leaving no room for refinement to help. Target: hidden=64, depth=2, where accuracy should meaningfully improve between steps 4 and 8.
+The model must need most of its step budget to converge. At hidden=128, the URM converges in 1-2 steps on 10×10 grids, leaving no room for refinement to help. Target: hidden=64, depth=2, where accuracy should meaningfully improve between steps 4 and 8. Run R1 experiment: `scripts/train_r1_scale.sh`.
 
 ## Setup
 

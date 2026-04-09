@@ -19,10 +19,11 @@ See `docs_hypotheses_archived.md` for full details of prior experiments.
 
 ### Experiment R1 — Right-sized baseline (find the scale)
 Date: TBD
-Config: depth=2, hidden=64, 4 heads, 8 recurrence steps, H_cycles=1, L_cycles=1, batch 512, 10×10 grids, 10K training steps
+Script: `scripts/train_r1_scale.sh`
+Config: `config/arch/urm_energy_r1.yaml` — depth=2, hidden=64, 4 heads, 8 recurrence steps, expansion=4, H_cycles=1, L_cycles=1, mode="urm", puzzle_emb_ndim=64, batch 512, 10×10 grids, ~10K training steps (4000 epochs), 5 eval checkpoints (every 800 epochs), lr=3e-4, stablemax_cross_entropy, bfloat16, EMA 0.999.
 Hypothesis: Reducing hidden from 128 to 64 (~4x fewer transformer params) will make the model need most of its 8 steps to converge on 10×10 grids, providing headroom for refinement experiments.
-Expected outcome: Per-step accuracy should show meaningful improvement between steps 4 and 8. If the model plateaus by step 2-3 (as with hidden=128), we need to go smaller (hidden=48 or hidden=32).
-Key measurements: per-step accuracy curve, total VRAM usage, throughput (it/s), pass@K at 10K steps.
+Expected outcome: Per-step accuracy (step_1_accuracy..step_8_accuracy) should show meaningful improvement between steps 4 and 8. If the model plateaus by step 2-3 (as with hidden=128), we need to go smaller (hidden=48 or hidden=32).
+Key measurements: per-step accuracy curve (logged to wandb), total VRAM usage, throughput (it/s), pass@K at 10K steps.
 Risk: hidden=64 may be too small for the transformer to learn ARC patterns at all, or too large and still converges fast.
 
 ### Result

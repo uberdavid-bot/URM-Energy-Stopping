@@ -158,12 +158,14 @@ class URM_Inner(nn.Module):
         carry: URMCarry,
         batch: Dict[str, torch.Tensor],
         capture_trajectory: bool = False,
+        capture_per_step_logits: bool = False,
     ) -> Tuple[URMCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         seq_info = dict(cos_sin=self.rotary_emb())
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
 
         hidden_states = carry.current_hidden
         trajectory: List[torch.Tensor] = []
+        per_step_logits: List[torch.Tensor] = []
 
         for _ in range(self.config.loops):
             hidden_states = hidden_states + input_embeddings
@@ -171,13 +173,20 @@ class URM_Inner(nn.Module):
                 hidden_states = layer(hidden_states=hidden_states, **seq_info)
             if capture_trajectory:
                 trajectory.append(hidden_states.detach())
+            if capture_per_step_logits:
+                per_step_logits.append(
+                    self.lm_head(hidden_states)[:, self.puzzle_emb_len:].detach()
+                )
 
         new_carry = replace(carry, current_hidden=hidden_states.detach())
         output = self.lm_head(hidden_states)[:, self.puzzle_emb_len:]
         q_logits = self.q_head(hidden_states[:, 0]).to(torch.float32)
+        result = (new_carry, output, (q_logits[..., 0], q_logits[..., 1]))
         if capture_trajectory:
-            return new_carry, output, (q_logits[..., 0], q_logits[..., 1]), trajectory
-        return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
+            result = result + (trajectory,)
+        if capture_per_step_logits:
+            result = result + (per_step_logits,)
+        return result
 
 
 class URM_Energy(nn.Module):
@@ -274,6 +283,7 @@ class URM_Energy(nn.Module):
         input_embeddings = self.inner._input_embeddings(
             new_current_data["inputs"], new_current_data["puzzle_identifiers"]
         )
+        per_step_logits = None
 
         if self.config.mode == "ebt":
             # Pure EBT: MCMC in hidden space from input_embeddings (no URM recurrence)
@@ -309,9 +319,16 @@ class URM_Energy(nn.Module):
 
         else:
             # URM mode (existing behavior)
-            new_carry_inner, logits, (q_halt_logits, q_continue_logits) = self.inner(
-                new_carry, new_current_data
+            capture_steps = not self.training
+            inner_result = self.inner(
+                new_carry, new_current_data,
+                capture_per_step_logits=capture_steps,
             )
+            if capture_steps:
+                new_carry_inner, logits, (q_halt_logits, q_continue_logits), per_step_logits = inner_result
+            else:
+                new_carry_inner, logits, (q_halt_logits, q_continue_logits) = inner_result
+                per_step_logits = None
             output_hidden = new_carry_inner.current_hidden[:, self.inner.puzzle_emb_len:]
             current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
 
@@ -361,6 +378,8 @@ class URM_Energy(nn.Module):
         }
         if unrefined_logits is not None:
             outputs["unrefined_logits"] = unrefined_logits
+        if self.config.mode == "urm" and per_step_logits:
+            outputs["per_step_logits"] = per_step_logits
 
         return (
             URMCarry(

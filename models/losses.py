@@ -203,6 +203,19 @@ class EnergyLossHead(nn.Module):
             "current_energy": outputs["current_energy"].mean().detach(),
         })
 
+        # Per-step accuracy (eval only, for convergence analysis)
+        with torch.no_grad():
+            if "per_step_logits" in outputs:
+                for step_idx, step_logits in enumerate(outputs["per_step_logits"]):
+                    step_preds = torch.argmax(step_logits, dim=-1)
+                    step_correct = mask & (step_preds == labels)
+                    step_acc = torch.where(
+                        valid_metrics,
+                        (step_correct.to(torch.float32) / loss_divisor).sum(-1),
+                        0,
+                    ).sum()
+                    metrics[f"step_{step_idx + 1}_accuracy"] = step_acc
+
         if profile is not None:
             for name, duration in profile.items():
                 metrics[f"profile/{name}"] = torch.tensor(duration, device=labels.device)

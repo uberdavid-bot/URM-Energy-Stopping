@@ -103,6 +103,66 @@ class TestURMEnergyForward:
         assert output_hidden.shape == (config["batch_size"], config["seq_len"], config["hidden_size"])
 
 
+class TestPerStepLogits:
+    def test_per_step_logits_captured_at_eval(self):
+        """Eval mode should capture per-step logits for convergence analysis."""
+        config = make_config(loops=4)
+        model = URM_Energy(config).to(DEVICE).eval()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        with torch.no_grad():
+            _, outputs = model(carry, batch)
+
+        assert "per_step_logits" in outputs, "per_step_logits missing from eval outputs"
+        per_step = outputs["per_step_logits"]
+        assert len(per_step) == config["loops"], (
+            f"Expected {config['loops']} per-step logits, got {len(per_step)}"
+        )
+        for i, step_logits in enumerate(per_step):
+            assert step_logits.shape == (config["batch_size"], config["seq_len"], config["vocab_size"]), (
+                f"Step {i} logits shape mismatch"
+            )
+        # Final step logits should match the output logits
+        assert torch.allclose(per_step[-1], outputs["logits"], atol=1e-5), (
+            "Last per-step logits should match final output logits"
+        )
+
+    def test_per_step_logits_not_captured_at_train(self):
+        """Training mode should not capture per-step logits (saves memory)."""
+        config = make_config(loops=4)
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        _, outputs = model(carry, batch)
+
+        assert "per_step_logits" not in outputs
+
+    def test_per_step_logits_accuracy_metrics(self):
+        """EnergyLossHead should produce per-step accuracy metrics at eval."""
+        from models.losses import EnergyLossHead
+
+        config = make_config(loops=4)
+        model = URM_Energy(config).to(DEVICE).eval()
+        loss_head = EnergyLossHead(model, "stablemax_cross_entropy").to(DEVICE)
+
+        batch = make_batch(config)
+        with torch.device(DEVICE):
+            carry = loss_head.initial_carry(batch)
+
+        with torch.no_grad():
+            carry, loss, metrics, _, _ = loss_head(
+                return_keys=[], carry=carry, batch=batch
+            )
+
+        for step in range(1, config["loops"] + 1):
+            key = f"step_{step}_accuracy"
+            assert key in metrics, f"Missing metric {key}"
+
+
 class TestEnergyHalting:
     def test_halting_after_max_loops(self):
         """Should halt after reaching max loops."""

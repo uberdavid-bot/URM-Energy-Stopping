@@ -22,6 +22,7 @@ DISABLE_COMPILE=1 torchrun --nproc-per-node 1 pretrain.py \
   puzzle_emb_weight_decay=0.01 \
   weight_decay=0.1 \
   target_q_update_every=10 \
+  'loop_deltas=[0]' \
   +run_name=$run_name \
   +checkpoint_path=$checkpoint_path \
   +ema=True

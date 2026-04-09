@@ -437,5 +437,127 @@ class TestEnergyLossHeadIntegration:
         loss.backward()
 
 
+class TestEBTMode:
+    def test_ebt_mode_forward(self):
+        """EBT mode should produce valid logits from input_embeddings via MCMC."""
+        config = make_config(mode="ebt", loops=4, mcmc_step_size=0.01)
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        _, outputs = model(carry, batch)
+
+        logits = outputs["logits"]
+        assert logits.shape == (config["batch_size"], config["seq_len"], config["vocab_size"])
+        assert not torch.allclose(logits, torch.zeros_like(logits), atol=1e-5)
+        assert "unrefined_logits" in outputs, "EBT should always produce unrefined_logits"
+        assert "current_energy" in outputs
+        assert "output_hidden" in outputs
+        assert outputs["output_hidden"].shape == (config["batch_size"], config["seq_len"], config["hidden_size"])
+        # EBT always halts after one call
+        carry_out, _ = model(carry, batch)
+        assert carry_out.halted.all(), "EBT should halt after one forward call"
+
+    def test_ebt_mode_energy_decreases(self):
+        """EBT MCMC should produce different logits than the zero-step baseline."""
+        config = make_config(mode="ebt", loops=8, mcmc_step_size=0.01)
+        model = URM_Energy(config).to(DEVICE).eval()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        with torch.no_grad():
+            _, outputs = model(carry, batch)
+
+        assert not torch.allclose(
+            outputs["logits"], outputs["unrefined_logits"], atol=1e-5
+        ), "EBT MCMC did not change logits from zero-step baseline"
+
+    def test_ebt_mode_gradients(self):
+        """EBT refined logits should give gradients to energy_head via MCMC."""
+        config = make_config(mode="ebt", loops=4, mcmc_step_size=0.01)
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        _, outputs = model(carry, batch)
+
+        labels = batch["labels"]
+        loss = torch.nn.functional.cross_entropy(
+            outputs["logits"].view(-1, config["vocab_size"]),
+            labels.view(-1), ignore_index=-100,
+        )
+        loss.backward()
+
+        assert model.energy_head.weight.grad is not None, "energy_head has no gradients"
+        assert model.energy_head.weight.grad.abs().sum() > 0, "energy_head gradients are zero"
+
+
+class TestHybridMode:
+    def test_hybrid_mode_forward(self):
+        """Hybrid mode should run URM steps then MCMC steps and produce valid output."""
+        config = make_config(mode="hybrid", loops=8, mcmc_start_step=4, mcmc_step_size=0.01)
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        _, outputs = model(carry, batch)
+
+        logits = outputs["logits"]
+        assert logits.shape == (config["batch_size"], config["seq_len"], config["vocab_size"])
+        assert "unrefined_logits" in outputs, "Hybrid should produce unrefined_logits"
+        assert not torch.allclose(
+            outputs["logits"].detach(), outputs["unrefined_logits"].detach(), atol=1e-5
+        ), "MCMC phase did not change logits"
+        # Hybrid always halts after one call
+        carry_out, _ = model(carry, batch)
+        assert carry_out.halted.all(), "Hybrid should halt after one forward call"
+
+    def test_hybrid_mode_gradients(self):
+        """Hybrid refined logits should give gradients to both URM layers and energy_head."""
+        config = make_config(mode="hybrid", loops=6, mcmc_start_step=3, mcmc_step_size=0.01)
+        model = URM_Energy(config).to(DEVICE).train()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+        _, outputs = model(carry, batch)
+
+        labels = batch["labels"]
+        V = config["vocab_size"]
+        loss = torch.nn.functional.cross_entropy(
+            outputs["logits"].view(-1, V), labels.view(-1), ignore_index=-100,
+        )
+        loss.backward()
+
+        # Energy head gets gradients through MCMC
+        assert model.energy_head.weight.grad is not None, "energy_head has no gradients"
+        assert model.energy_head.weight.grad.abs().sum() > 0, "energy_head gradients are zero"
+        # URM layers get gradients through URM phase
+        layer_param = next(model.inner.layers[0].parameters())
+        assert layer_param.grad is not None, "URM layer has no gradients"
+        assert layer_param.grad.abs().sum() > 0, "URM layer gradients are zero"
+
+
+class TestModeURMUnchanged:
+    def test_mode_urm_unchanged(self):
+        """mode='urm' should produce same outputs as before (default behavior)."""
+        config = make_config()  # mode defaults to "urm"
+        model = URM_Energy(config).to(DEVICE).eval()
+
+        batch = make_batch(config)
+        carry = make_carry(model, batch)
+
+        with torch.no_grad():
+            _, outputs = model(carry, batch)
+
+        assert outputs["logits"].shape == (config["batch_size"], config["seq_len"], config["vocab_size"])
+        assert "unrefined_logits" not in outputs, "URM without MCMC should not have unrefined_logits"
+        assert "current_energy" in outputs
+        assert "output_hidden" in outputs
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

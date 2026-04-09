@@ -73,7 +73,7 @@ for step in range(N):
 logits = lm_head(hidden)
 ```
 
-Explicit energy minimization: each step follows the energy gradient downhill in hidden space. Energy convergence = principled stopping. Energy value used for pass@K ranking.
+Explicit energy minimization: each step follows the energy gradient downhill in hidden space. Energy convergence = principled stopping. Energy value used for pass@K ranking. **Implemented** via `URMConfig.mode="ebt"`.
 
 ### Why start from input_embeddings?
 Starting from init_hidden (learned constant) means MCMC must discover the input structure from scratch via energy gradients alone. Starting from input_embeddings gives MCMC a representation that encodes *what the input is* without attention-based processing. This is analogous to the EBT paper providing context and only optimizing the prediction.
@@ -97,15 +97,15 @@ During inference, detach between steps (no create_graph needed, saves memory).
 
 | Loss | What it trains | When used |
 |------|---------------|-----------|
-| Reconstruction (unrefined) | URM backbone | Always in URM mode; on initial logits before MCMC in EBT mode |
-| Reconstruction (refined) | Energy head (via MCMC backprop) | EBT mode, on logits after MCMC |
-| Contrastive | Energy values (E(true) < E(pred)) | Optional additional signal |
+| Reconstruction (unrefined) | URM backbone / embeddings | Always: on logits before MCMC (or only logits if no MCMC) |
+| Reconstruction (refined) | Energy head (via MCMC backprop) | EBT/hybrid mode, on logits after MCMC |
 
-**Dual reconstruction loss** is mandatory when training with MCMC: loss on both pre-MCMC and post-MCMC logits. The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients.
+**Dual reconstruction loss** (0.5/0.5 weighting) is mandatory when training with MCMC: loss on both pre-MCMC and post-MCMC logits. The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients.
 
-### Training modes
-- **URM baseline**: reconstruction + Q-halt loss, no energy head. First-order only.
-- **EBT**: reconstruction (dual) + contrastive. Second-order gradients via create_graph=True through MCMC.
+### Training modes (URMConfig.mode)
+- **"urm"**: Reconstruction + Q-halt loss, no energy head needed. First-order only.
+- **"ebt"**: Dual reconstruction loss. N MCMC steps from input_embeddings. Second-order gradients via create_graph=True.
+- **"hybrid"**: Dual reconstruction loss. M URM steps then (N-M) MCMC steps (controlled by `mcmc_start_step`). Second-order gradients through MCMC phase.
 
 ## Recurrence Simplification
 

@@ -92,6 +92,14 @@ When training with MCMC refinement, compute reconstruction loss on BOTH unrefine
 ### Legacy code removed
 DSM (denoising score matching), contrastive loss, and trajectory supervision have been removed. DSM was unnecessary given tractable second-order gradients. Contrastive-only loss caused energy collapse. Trajectory supervision is a future Phase 4 extension. The only energy training signal is reconstruction-through-MCMC (dual loss). Deleted files: `models/dsm_loss.py`, `models/trajectory_loss.py`, and their associated configs/scripts.
 
+### Three forward modes implemented
+`URMConfig.mode` controls the refinement mechanism:
+- **"urm"** (default): N iterations of shared-weight transformer recurrence (implicit refinement). Q-halt or fixed-step stopping.
+- **"ebt"**: N steps of MCMC gradient descent in hidden space starting from input_embeddings (explicit refinement). Energy convergence stopping. Enables Experiment R3.
+- **"hybrid"**: M URM recurrence steps then (N-M) MCMC steps, controlled by `mcmc_start_step`. Enables Experiment R4.
+
+EBT and hybrid modes always halt after one forward() call (all compute happens in that call). Both use dual reconstruction loss (unrefined + refined) when training.
+
 ### Right-size the model for the problem
 The model must need most of its step budget to converge. At hidden=128, the URM converges in 1-2 steps on 10×10 grids, leaving no room for refinement to help. Target: hidden=64, depth=2, where accuracy should meaningfully improve between steps 4 and 8.
 

@@ -172,6 +172,22 @@ This is the correct R1 baseline. The model is strong and fully trained, but ther
 
 ---
 
+### Experiment R1e — expansion=2 full training
+Date: 2026-04-10
+Script: `scripts/train_r1e_exp2_full.sh`
+Config: depth=2, h=128, 4 heads, expansion=2, 8 steps, batch 512, 10×10 grids, 80K steps (31590 epochs), constant LR (3e-4) after 100-step warmup, EMA 0.999. ~330K transformer params (vs ~530K at exp=4). eval_interval=2106 epochs (15 checkpoints).
+
+Hypothesis: The full 80K baseline at exp=4 converges in 1 step with 85.9% token accuracy. Expansion=2 has ~38% fewer params (mostly MLP). With full training duration and constant LR, we want to determine: (a) does expansion=2 reach high enough accuracy for exact puzzle solves, and (b) does a multi-step convergence curve emerge at any point during training. The per-step accuracy and delta norm logs across the full run will show exactly when (if ever) step 1 stops being sufficient and later steps start contributing.
+
+Expected outcome: Three possible outcomes: (1) multi-step convergence emerges mid-training then collapses as the model gets stronger — this tells us the right training duration for refinement experiments. (2) Multi-step convergence persists at end of training — we've found our right-sizing. (3) Flat curve throughout, same as exp=4 — expansion=2 still converges in 1 step and we need to reduce capacity further.
+
+Reference: R1c (exp=2, 10K cosine) was undertrained. R1-full (exp=4, 80K) proved full training is needed for ground truth.
+
+### Result
+TBD
+
+---
+
 ### Experiment R2 — Hidden-space MCMC (fix the implementation)
 Date: TBD
 Config: Same backbone as R1. Add energy head. MCMC in hidden space, no detach between steps during training, create_graph=True, dual reconstruction loss, N MCMC steps.

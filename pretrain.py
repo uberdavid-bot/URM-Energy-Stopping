@@ -18,12 +18,8 @@ import wandb
 import coolname
 import hydra
 import pydantic
-# from omegaconf import DictConfig
 from omegaconf import DictConfig, OmegaConf
-# from adam_atan2 import AdamATan2
 from adam_atan2_pytorch import AdamAtan2 as AdamATan2
-# from adam_atan2_pytorch import MuonAdamAtan2
-from models.muon import Muon
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
@@ -130,12 +126,8 @@ class PretrainConfig(pydantic.BaseModel):
     eval_interval: Optional[int] = None
     eval_save_outputs: List[str] = []
 
-    loop_deltas: List[int] = []
-
     ema: bool = False
     ema_rate: float = 0.999
-
-    use_muon: bool = False
 
 
 
@@ -195,48 +187,20 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
                 for param in list(model.parameters()) + list(model.buffers()):
                     dist.broadcast(param, src=0)
 
-    if config.use_muon:
-        adam_params = [p for p in model.parameters() if p.ndim != 2]
-        muon_params = [p for p in model.parameters() if p.ndim == 2]
-
-        optimizers = [
-            CastedSparseEmbeddingSignSGD_Distributed(
-                model.model.puzzle_emb.buffers(),  # type: ignore
-                lr=0,  # Needs to be set by scheduler
-                weight_decay=config.puzzle_emb_weight_decay,
-                world_size=world_size,
-            ),
-            Muon([
-                {
-                    "params": muon_params,
-                    "use_muon": True,
-                    "lr": 1e-4,
-                },
-                {
-                    "params": adam_params,
-                    "use_muon": False,
-                    "lr": 1e-4,
-                    "weight_decay": 0.1,
-                    "adamw_betas": (0.9, 0.95),
-                    "adamw_eps": 1e-8,
-                },
-            ]),
-        ]
-    else:
-        optimizers = [
-            CastedSparseEmbeddingSignSGD_Distributed(
-                model.model.puzzle_emb.buffers(),  # type: ignore
-                lr=0,  # Needs to be set by scheduler
-                weight_decay=config.puzzle_emb_weight_decay,
-                world_size=world_size,
-            ),
-            AdamATan2(
-                model.parameters(),
-                lr=max(config.lr, 1e-8),  # Needs to be set by scheduler
-                weight_decay=config.weight_decay,
-                betas=(config.beta1, config.beta2),
-            ),
-        ]
+    optimizers = [
+        CastedSparseEmbeddingSignSGD_Distributed(
+            model.model.puzzle_emb.buffers(),  # type: ignore
+            lr=0,  # Needs to be set by scheduler
+            weight_decay=config.puzzle_emb_weight_decay,
+            world_size=world_size,
+        ),
+        AdamATan2(
+            model.parameters(),
+            lr=max(config.lr, 1e-8),  # Needs to be set by scheduler
+            weight_decay=config.weight_decay,
+            betas=(config.beta1, config.beta2),
+        ),
+    ]
 
     optimizer_lrs = [config.puzzle_emb_lr, config.lr]
 
@@ -372,22 +336,6 @@ def load_config_from_checkpoint_path(path: str) -> Optional[PretrainConfig]:
     return None
 
 
-def _resize_puzzle_embedding_if_needed(model: nn.Module, state_dict: dict):
-    puzzle_emb_name = "_orig_mod.model.inner.puzzle_emb.weights"
-    expected_shape: torch.Size = model.model.puzzle_emb.weights.shape  # type: ignore
-    if puzzle_emb_name in state_dict:
-        puzzle_emb = state_dict[puzzle_emb_name]
-        if puzzle_emb.shape != expected_shape:
-            print(
-                f"Resetting puzzle embedding as shape is different. Found {puzzle_emb.shape}, Expected {expected_shape}"
-            )
-
-            # Re-initialize using mean
-            state_dict[puzzle_emb_name] = (
-                torch.mean(puzzle_emb, dim=0, keepdim=True).expand(expected_shape).contiguous()
-            )
-
-
 def load_checkpoint(train_state: TrainState, config: PretrainConfig, rank: int):
     load_path = config.load_checkpoint
     if load_path is None:
@@ -436,7 +384,6 @@ def load_checkpoint(train_state: TrainState, config: PretrainConfig, rank: int):
         rng_state = None
         cuda_rng_state = None
 
-    _resize_puzzle_embedding_if_needed(train_state.model, state_dict)
     try:
         load_result = train_state.model.load_state_dict(
             state_dict, strict=config.load_strict, assign=True
@@ -550,23 +497,6 @@ def train_batch(
     loss_scale = 1.0 / (global_batch_size * accum_steps)
     (loss_scale * loss).backward()
     train_state.accum_step += 1
-
-    # Debugging for ARCModel
-    if rank == 0 and train_state.step % 100 == 0:
-        with torch.no_grad():
-            print(f"\nStep {train_state.step}:")
-            if 'reconstruction_loss' in metrics:
-                print(f"  Reconstruction loss: {metrics['reconstruction_loss']:.4f}")
-            if 'current_energy' in metrics:
-                print(f"  Energy: {metrics['current_energy']:.4f}")
-            if 'unrefined_lm_loss' in metrics:
-                print(f"  Unrefined LM loss: {metrics['unrefined_lm_loss']:.4f}")
-            if 'refined_lm_loss' in metrics:
-                print(f"  Refined LM loss: {metrics['refined_lm_loss']:.4f}")
-            if 'mcmc_improvement' in metrics:
-                print(f"  MCMC improvement: {metrics['mcmc_improvement']:.4f}")
-            if 'unrefined_accuracy' in metrics:
-                print(f"  Unrefined accuracy: {metrics['unrefined_accuracy']:.4f}")
 
     should_step = train_state.accum_step % accum_steps == 0
     if not should_step:
@@ -796,30 +726,6 @@ def save_code_and_config(config: PretrainConfig, save_dir: str):
                 f"# Error: {type(e).__name__}: {e}\n"
             )
 
-    # config_dict = json.loads(config.model_dump_json())
-
-    # try:
-    #     with open(cfg_path, "w", encoding="utf-8") as f:
-    #         yaml.safe_dump(config_dict, f, sort_keys=False, allow_unicode=True)
-
-    # except Exception as e:
-    #     with open(json_path, "w", encoding="utf-8") as f:
-    #         json.dump(config_dict, f, ensure_ascii=False, indent=2)
-
-    #     with open(cfg_path, "w", encoding="utf-8") as f:
-    #         f.write(
-    #             "# Failed to write config as YAML, wrote config.json instead.\n"
-    #             f"# Error: {type(e).__name__}: {e}\n"
-    #         )
-
-
-def _get_loop_config(model: nn.Module):
-    inner_model = getattr(model, "model", None)
-    model_config = getattr(inner_model, "config", None)
-    if model_config is None or not hasattr(model_config, "loops"):
-        return None
-
-    return model_config
 
 
 def _prefix_metrics(metrics: Any, prefix: str):
@@ -970,7 +876,7 @@ def launch(hydra_config: DictConfig):
 
         ############ Evaluation
         if eval_loader is not None and eval_metadata is not None:
-            # 选择用于评估的 train_state（EMA 或原始）
+            # Use EMA weights for evaluation if enabled
             if config.ema and ema_helper is not None:
                 train_state_eval = copy.deepcopy(train_state)
                 train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
@@ -978,40 +884,26 @@ def launch(hydra_config: DictConfig):
                 train_state_eval = train_state
 
             train_state_eval.model.eval()
-            loop_config = _get_loop_config(train_state_eval.model)
-            if loop_config is not None:
-                original_loops = loop_config.loops
-                if len(config.loop_deltas) == 0:
-                    config.loop_deltas = [0, 8]
-                else:
-                    config.loop_deltas = [0]
-            for delta in config.loop_deltas:
-                if loop_config is not None:
-                    loop_config.loops = original_loops + delta
 
-                metrics = evaluate(
-                    config,
-                    train_state_eval,
-                    eval_loader,
-                    eval_metadata,
-                    evaluators,
-                    rank=RANK,
-                    world_size=WORLD_SIZE,
-                    cpu_group=CPU_PROCESS_GROUP,
-                )
-                if RANK == 0 and metrics is not None:
-                    wandb.log(metrics, step=train_state.step)
+            metrics = evaluate(
+                config,
+                train_state_eval,
+                eval_loader,
+                eval_metadata,
+                evaluators,
+                rank=RANK,
+                world_size=WORLD_SIZE,
+                cpu_group=CPU_PROCESS_GROUP,
+            )
+            if RANK == 0 and metrics is not None:
+                wandb.log(metrics, step=train_state.step)
 
-            if loop_config is not None:
-                loop_config.loops = original_loops
-
-            # 用完临时的 eval state 后可以丢掉，节省显存/内存
             if config.ema and ema_helper is not None and train_state_eval is not train_state:
                 del train_state_eval
 
         if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
             if config.ema and ema_helper is not None:
-                # 临时拷贝一个带 EMA 权重的 state 来保存
+                # Save checkpoint with EMA weights
                 ts_to_save = copy.deepcopy(train_state)
                 ts_to_save.model = ema_helper.ema_copy(ts_to_save.model)
                 save_train_state(config, ts_to_save)

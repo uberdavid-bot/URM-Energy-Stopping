@@ -166,8 +166,11 @@ class URM_Inner(nn.Module):
         hidden_states = carry.current_hidden
         trajectory: List[torch.Tensor] = []
         per_step_logits: List[torch.Tensor] = []
+        per_step_delta_norms: List[torch.Tensor] = []
 
         for _ in range(self.config.loops):
+            if capture_per_step_logits:
+                prev_hidden = hidden_states.detach()
             hidden_states = hidden_states + input_embeddings
             for layer in self.layers:
                 hidden_states = layer(hidden_states=hidden_states, **seq_info)
@@ -177,6 +180,9 @@ class URM_Inner(nn.Module):
                 per_step_logits.append(
                     self.lm_head(hidden_states)[:, self.puzzle_emb_len:].detach()
                 )
+                per_step_delta_norms.append(
+                    (hidden_states.detach() - prev_hidden).norm(dim=-1).mean()
+                )
 
         new_carry = replace(carry, current_hidden=hidden_states.detach())
         output = self.lm_head(hidden_states)[:, self.puzzle_emb_len:]
@@ -185,7 +191,7 @@ class URM_Inner(nn.Module):
         if capture_trajectory:
             result = result + (trajectory,)
         if capture_per_step_logits:
-            result = result + (per_step_logits,)
+            result = result + (per_step_logits, per_step_delta_norms)
         return result
 
 
@@ -325,10 +331,11 @@ class URM_Energy(nn.Module):
                 capture_per_step_logits=capture_steps,
             )
             if capture_steps:
-                new_carry_inner, logits, (q_halt_logits, q_continue_logits), per_step_logits = inner_result
+                new_carry_inner, logits, (q_halt_logits, q_continue_logits), per_step_logits, per_step_delta_norms = inner_result
             else:
                 new_carry_inner, logits, (q_halt_logits, q_continue_logits) = inner_result
                 per_step_logits = None
+                per_step_delta_norms = None
             output_hidden = new_carry_inner.current_hidden[:, self.inner.puzzle_emb_len:]
             current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
 
@@ -380,6 +387,7 @@ class URM_Energy(nn.Module):
             outputs["unrefined_logits"] = unrefined_logits
         if self.config.mode == "urm" and per_step_logits:
             outputs["per_step_logits"] = per_step_logits
+            outputs["per_step_delta_norms"] = per_step_delta_norms
 
         return (
             URMCarry(

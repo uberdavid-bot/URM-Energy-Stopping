@@ -159,7 +159,16 @@ Hypothesis: The 10K-step grid sweep runs were undertrained. With cosine LR decay
 Expected outcome: Higher pass@1 (Exp 0 baseline was 15.9% composite), clearer per-step convergence curve once the model is properly trained. This is the actual R1 measurement that should have been done first.
 
 ### Result
-TBD
+**25.3% pass@1, 85.9% token accuracy, 16.3% exact accuracy.** Wandb: `R1-full-h128-10x10-260410` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/vimsv39t))
+
+Per-step accuracy: **85.9%** → 85.8% → 85.6% → 85.4% → 85.4% → 85.7% → 85.8% → 85.9% (steps 1-8). **0.6% variation — completely flat.** The model peaks at step 1 and step 8 equally. Delta norms show a U-shape (0.009 → 0.005 → 0.008) suggesting the model oscillates around a fixed point rather than converging toward one.
+
+pass@K (Q-halt): 25.3% @1, 37.0% @2, 49.4% @5, 51.9% @10, 59.7% @100, 64.9% @1000.
+pass@K (energy): 0% @1, 7.1% @100, 40.9% @1000. Energy ranking far worse than Q-halt.
+
+**Conclusion:** With proper training (80K steps), the model is much stronger (25.3% pass@1 vs 0% at 10K steps, 85.9% token acc vs 58%) but the per-step convergence curve is even flatter (0.6% vs 2.1%). This confirms definitively that at h=128/depth=2, URM recurrence converges in a single pass. The 10K-step runs weren't showing a flat convergence curve due to undertrained models — the flat curve is the ground truth.
+
+This is the correct R1 baseline. The model is strong and fully trained, but there is no multi-step convergence to exploit for refinement experiments.
 
 ---
 

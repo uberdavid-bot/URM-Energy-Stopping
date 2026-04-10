@@ -102,7 +102,11 @@ pass@K (Q-halt): 0% @1, 2.6% @2, 8.4% @5, 11.0% @10, 14.9% @100, 21.4% @1000.
 **Conclusion:** Baseline confirmed post-refactor. Model converges by step 1-2 on 10×10. Too easy.
 
 **R1-grid11 (11×11):**
-Result: TBD
+Wandb: `R1-grid11-h128-260409` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/koy26yun))
+epochs=3520, eval_interval=704, 329 groups, seq=121.
+Per-step accuracy: 63.2% → 62.7% → 62.7% → 62.7% → 63.0% → 63.5% → **63.7%** → 63.4% (steps 1-8). Flat — only 1% variation. Delta norms ~0.004-0.006.
+pass@K (Q-halt): 0% @1, 0.6% @2, 1.7% @5, 5.6% @10, 14.6% @100, 19.7% @1000.
+**Conclusion:** Still too easy. Converges by step 1.
 
 **R1-grid12 (12×12):**
 Result: TBD

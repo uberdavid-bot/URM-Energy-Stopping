@@ -90,9 +90,14 @@ The energy head learns from multi-step MCMC trajectories via create_graph=True. 
 When training with MCMC refinement, compute reconstruction loss on BOTH unrefined logits (before MCMC) and refined logits (after MCMC), weighted 0.5/0.5. The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients. Refined-only loss destroys URM learning (confirmed in Exp 3a).
 
 ### Legacy code removed
-DSM (denoising score matching), contrastive loss, and trajectory supervision have been removed. DSM was unnecessary given tractable second-order gradients. Contrastive-only loss caused energy collapse. Trajectory supervision is a future Phase 4 extension. The only energy training signal is reconstruction-through-MCMC (dual loss). Deleted files: `models/dsm_loss.py`, `models/trajectory_loss.py`, and their associated configs/scripts.
-
-Legacy model files (`models/hrm/`, `models/trm/`, `models/urm/urm.py`) and their configs (`config/arch/hrm.yaml`, `config/arch/trm.yaml`, `config/arch/urm.yaml`, `config/arch/urm_small.yaml`) have been removed. The unified model in `models/urm/urm_energy.py` handles all modes (urm, ebt, hybrid) via `URMConfig.mode`.
+The codebase has been streamlined to only the active experiment pipeline:
+- **Deleted models**: `models/hrm/`, `models/trm/`, `models/urm/urm.py` — the unified `models/urm/urm_energy.py` handles all modes (urm, ebt, hybrid) via `URMConfig.mode`.
+- **Deleted losses**: `models/dsm_loss.py`, `models/trajectory_loss.py` — DSM was unnecessary given tractable second-order gradients; contrastive-only caused energy collapse. The only energy training signal is reconstruction-through-MCMC (dual loss).
+- **Deleted configs**: all legacy arch configs (hrm, trm, urm, urm_small, urm_energy, urm_energy_small) and `cfg_eval.yaml`. Active configs: `config/arch/urm_energy_r1.yaml`, `config/arch/urm_r1_h96.yaml`.
+- **Deleted scripts**: all legacy training scripts (URM_arcagi*, URM_sudoku, baseline_small, energy_small). Active scripts: `scripts/train_r1_scale.sh`, `scripts/train_r1_h96.sh`.
+- **Deleted data builders**: `build_maze_dataset.py`, `build_sudoku_dataset.py` — only `build_arc_dataset.py` is used.
+- **Deleted standalone tools**: `evaluate_trained_model.py`, `attn_maps_ab.py` — the training loop handles evaluation.
+- **Deleted raw data**: `kaggle/` directory (11MB raw ARC JSON) — not used by training; download from ARC-AGI repo if rebuilding the dataset.
 
 ### Three forward modes implemented
 `URMConfig.mode` controls the refinement mechanism:
@@ -117,9 +122,10 @@ pip install -r requirements.txt
 ```
 
 ### Data preparation (10x10 grids)
+Download the ARC-AGI JSON files from https://github.com/fchollet/ARC-AGI into a local directory first.
 ```bash
 python -m data.build_arc_dataset \
-  --input-file-prefix kaggle/combined/arc-agi \
+  --input-file-prefix <path-to-arc-json>/arc-agi \
   --output-dir data/arc1concept-aug-1000-size-10 \
   --subsets training evaluation concept \
   --test-set-name evaluation \

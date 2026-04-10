@@ -123,7 +123,31 @@ pass@K (Q-halt): 0.7% @1, 1.1% @2, 2.9% @5, 4.3% @10, 8.0% @100, 9.4% @1000.
 **Conclusion:** Still flat. pass@K declining with grid size (harder puzzles, fewer solved) but per-step curve stays flat.
 
 **R1-grid14 (14×14):**
-Result: TBD
+Wandb: `R1-grid14-h128-260410` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/ma32mka7))
+epochs=2375, eval_interval=475, 487 groups, seq=196.
+Per-step accuracy: 58.8% → 58.1% → 58.3% → 59.2% → 60.0% → **60.3%** → 60.1% → 59.6% (steps 1-8). 2.1% variation. Delta norms ~0.004-0.007.
+pass@K (Q-halt): 0% @1, 0% @2, 2.0% @5, 3.3% @10, 7.2% @100, 9.5% @1000.
+**Conclusion:** Same pattern — flat curve, declining pass@K.
+
+### Grid Sweep Summary
+
+| Grid | seq | Token acc | Step variation | Peak step | pass@1 | pass@100 |
+|------|-----|-----------|---------------|-----------|--------|----------|
+| 10×10 | 100 | 58.5% | 2.1% | 5 | 0.0% | 14.9% |
+| 11×11 | 121 | 63.4% | 1.0% | 7 | 0.0% | 14.6% |
+| 12×12 | 144 | 61.2% | 2.4% | 7 | 0.9% | 12.7% |
+| 13×13 | 169 | 60.5% | 1.4% | 5 | 0.7% | 8.0% |
+| 14×14 | 196 | 59.6% | 2.1% | 6 | 0.0% | 7.2% |
+| 15×15 | 225 | 55.1% | 3.8% | 6 | 0.0% | 4.2% |
+
+**Key finding:** Per-step variation is consistently 1-4% across all grid sizes 10-15 at h=128/exp=4. The model converges in 1-2 recurrence steps regardless of problem difficulty. Increasing grid size makes the problem harder (pass@K drops steadily) but does NOT create the multi-step convergence curve needed for refinement experiments.
+
+**Interpretation:** The flat per-step curve appears to be a fundamental property of this architecture at h=128, not a problem difficulty issue. The URM recurrence reaches its attractor after 1-2 passes through shared-weight transformer layers, and additional passes provide negligible improvement. The 15×15 result shows the largest variation (3.8%) but still insufficient.
+
+**Next steps to consider:**
+1. **Depth=1 instead of depth=2** — fewer layers per recurrence step forces more reliance on repeated iteration. This is the most direct way to make each step "weaker."
+2. **Remove input re-injection** — without re-injecting input_embeddings at each step, the model must carry all information in hidden states, potentially requiring more steps to converge.
+3. **Accept the flat curve** and proceed to R2/R3 anyway — the energy head comparison may still reveal differences in stopping/ranking even if per-step accuracy is flat.
 
 ---
 

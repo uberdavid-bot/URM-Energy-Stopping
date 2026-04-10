@@ -90,6 +90,29 @@ Token-level accuracy: 55.1%. Exact puzzle accuracy: 0.07%.
 
 **Next:** Exhaustive sweep of grid sizes 11, 12, 13, 14 with same h=128/exp=4 model to find the sweet spot.
 
+### R1 Grid Size Sweep — h=128, exp=4, depth=2, 4 heads, 8 loops, batch 512, ~10K steps each
+
+All runs use `config/arch/urm_r1_15x15.yaml` (h=128/exp=4/depth=2) with `scripts/train_r1_grid_sweep.sh`.
+
+**R1-grid10 (10×10, confirmation):**
+Wandb: `R1-grid10-h128-260409` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/1nh7wwjr))
+epochs=3950, eval_interval=790, 294 groups, seq=100.
+Per-step accuracy: 58.2% → 58.3% → 59.1% → 60.0% → **60.3%** → 59.9% → 59.2% → 58.5% (steps 1-8). Flat — only 2.1% variation. Delta norms ~0.003.
+pass@K (Q-halt): 0% @1, 2.6% @2, 8.4% @5, 11.0% @10, 14.9% @100, 21.4% @1000.
+**Conclusion:** Baseline confirmed post-refactor. Model converges by step 1-2 on 10×10. Too easy.
+
+**R1-grid11 (11×11):**
+Result: TBD
+
+**R1-grid12 (12×12):**
+Result: TBD
+
+**R1-grid13 (13×13):**
+Result: TBD
+
+**R1-grid14 (14×14):**
+Result: TBD
+
 ---
 
 ### Experiment R2 — Hidden-space MCMC (fix the implementation)

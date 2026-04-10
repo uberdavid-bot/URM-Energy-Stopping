@@ -1,5 +1,6 @@
 # Data (too large for git)
 data/arc1concept-aug-*/
+kaggle/
 data/*.bin
 data/*.pt
 

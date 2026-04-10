@@ -123,16 +123,26 @@ conda activate urm
 pip install -r requirements.txt
 ```
 
-### Data preparation (10x10 grids)
-Download the ARC-AGI JSON files from https://github.com/fchollet/ARC-AGI into a local directory first.
+### Data preparation
+Raw ARC-AGI JSON files live in `kaggle/combined/` (gitignored). To regenerate datasets at different grid sizes:
 ```bash
+# 10x10 grids (100 tokens)
 python -m data.build_arc_dataset \
-  --input-file-prefix <path-to-arc-json>/arc-agi \
+  --input-file-prefix kaggle/combined/arc-agi \
   --output-dir data/arc1concept-aug-1000-size-10 \
   --subsets training evaluation concept \
   --test-set-name evaluation \
   --num-aug 1000 \
   --max-grid-size 10
+
+# 15x15 grids (225 tokens)
+python -m data.build_arc_dataset \
+  --input-file-prefix kaggle/combined/arc-agi \
+  --output-dir data/arc1concept-aug-1000-size-15 \
+  --subsets training evaluation concept \
+  --test-set-name evaluation \
+  --num-aug 1000 \
+  --max-grid-size 15
 ```
 
 ### Running tests

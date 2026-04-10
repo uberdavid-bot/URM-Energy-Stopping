@@ -2,7 +2,7 @@
 # depth=2, hidden=64, 8 recurrence steps, 10x10 grids
 # Goal: model should need most of its step budget to converge
 
-name: urm.urm_energy@URM_Energy
+name: urm.urm_energy@ARCModel
 loss:
   name: losses@EnergyLossHead
   loss_type: stablemax_cross_entropy

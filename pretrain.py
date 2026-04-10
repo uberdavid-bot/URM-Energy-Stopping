@@ -551,7 +551,7 @@ def train_batch(
     (loss_scale * loss).backward()
     train_state.accum_step += 1
 
-    # Debugging for URM_Energy
+    # Debugging for ARCModel
     if rank == 0 and train_state.step % 100 == 0:
         with torch.no_grad():
             print(f"\nStep {train_state.step}:")

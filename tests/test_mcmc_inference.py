@@ -1,11 +1,11 @@
 """
-Tests for URM_Energy architecture: energy head, MCMC refinement.
+Tests for ARCModel architecture: energy head, MCMC refinement.
 
 Requires CUDA — runs real flash_attn and model code on GPU.
 """
 import torch
 import pytest
-from models.urm.urm_energy import URM_Energy
+from models.urm.urm_energy import ARCModel
 
 DEVICE = "cuda"
 
@@ -58,7 +58,7 @@ class TestURMEnergyForward:
     def test_forward_runs_inner(self):
         """forward() should run URM inner recurrence and produce meaningful logits."""
         config = make_config()
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -74,7 +74,7 @@ class TestURMEnergyForward:
     def test_forward_computes_energy(self):
         """forward() should compute current_energy on the output."""
         config = make_config()
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -90,7 +90,7 @@ class TestURMEnergyForward:
     def test_forward_returns_output_hidden(self):
         """forward() should return output_hidden without puzzle embedding positions."""
         config = make_config()
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -107,7 +107,7 @@ class TestPerStepLogits:
     def test_per_step_logits_captured_at_eval(self):
         """Eval mode should capture per-step logits for convergence analysis."""
         config = make_config(loops=4)
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -132,7 +132,7 @@ class TestPerStepLogits:
     def test_per_step_logits_not_captured_at_train(self):
         """Training mode should not capture per-step logits (saves memory)."""
         config = make_config(loops=4)
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -146,7 +146,7 @@ class TestPerStepLogits:
         from models.losses import EnergyLossHead
 
         config = make_config(loops=4)
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
         loss_head = EnergyLossHead(model, "stablemax_cross_entropy").to(DEVICE)
 
         batch = make_batch(config)
@@ -167,7 +167,7 @@ class TestEnergyHalting:
     def test_halting_after_max_loops(self):
         """Should halt after reaching max loops."""
         config = make_config(loops=3)
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -186,7 +186,7 @@ class TestEnergyHalting:
     def test_halting_respects_min_steps(self):
         """Should not halt before min_steps even if energy converges."""
         config = make_config(loops=20, min_steps=5, energy_threshold=1e10)
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -212,7 +212,7 @@ class TestEnergyHalting:
     def test_prev_energy_propagation(self):
         """prev_energy should be set after first forward pass."""
         config = make_config()
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -229,7 +229,7 @@ class TestMCMCRefinement:
     def test_refine_with_mcmc_changes_logits(self):
         """refine_with_mcmc should produce different logits than the input."""
         config = make_config()
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -255,7 +255,7 @@ class TestEnergyLossHeadBackward:
     def test_energy_head_gets_gradients(self):
         """After backward, energy_head parameters should have gradients from energy computation."""
         config = make_config()
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -280,7 +280,7 @@ class TestEnergyLossHeadBackward:
     def test_no_mcmc_create_graph_in_forward(self):
         """Training forward pass should NOT use create_graph through sequential MCMC steps."""
         config = make_config()
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -300,7 +300,7 @@ class TestRotaryEmbeddingLength:
     def test_rotary_buffer_covers_energy_concat(self):
         """Rotary embedding buffer must be >= 2*seq_len + puzzle_emb_len."""
         config = make_config(puzzle_emb_ndim=64)  # = hidden_size -> puzzle_emb_len=1
-        model = URM_Energy(config).to(DEVICE)
+        model = ARCModel(config).to(DEVICE)
 
         seq_len = config["seq_len"]
         puzzle_emb_len = model.inner.puzzle_emb_len
@@ -312,7 +312,7 @@ class TestRotaryEmbeddingLength:
     def test_rotary_without_puzzle_emb(self):
         """Rotary buffer correct when puzzle_emb_ndim=0."""
         config = make_config()
-        model = URM_Energy(config).to(DEVICE)
+        model = ARCModel(config).to(DEVICE)
 
         expected_len = 2 * config["seq_len"]
         rotary_len = model.inner.rotary_emb.cos_cached.shape[0]
@@ -323,7 +323,7 @@ class TestEnergyInOutputs:
     def test_current_energy_in_outputs(self):
         """current_energy must be in outputs with shape [batch_size]."""
         config = make_config()
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -356,7 +356,7 @@ class TestMCMCTraining:
     def test_mcmc_training_creates_graph(self):
         """Forward in train mode with mcmc_training=True should produce logits with grad_fn."""
         config = make_config(mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True)
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -371,7 +371,7 @@ class TestMCMCTraining:
     def test_mcmc_training_energy_head_gets_gradients(self):
         """Backward through MCMC-refined logits should give energy_head non-zero gradients."""
         config = make_config(mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True)
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -397,7 +397,7 @@ class TestMCMCTraining:
     def test_mcmc_improves_logits(self):
         """MCMC refinement should produce different logits than unrefined."""
         config = make_config(mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True)
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -411,7 +411,7 @@ class TestMCMCTraining:
     def test_mcmc_eval_no_create_graph(self):
         """Eval mode with mcmc_steps>0 should work without create_graph."""
         config = make_config(mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True)
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -427,7 +427,7 @@ class TestMCMCTraining:
     def test_mcmc_disabled_by_default(self):
         """Default config (mcmc_steps=0) should not apply MCMC refinement."""
         config = make_config()  # mcmc_steps defaults to 0
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -443,7 +443,7 @@ class TestMCMCTraining:
         config = make_config(
             mcmc_steps=4, mcmc_step_size=0.01, mcmc_training=True,
         )
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -479,7 +479,7 @@ class TestEnergyLossHeadIntegration:
         from models.losses import EnergyLossHead
 
         config = make_config(loops=4)
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
         loss_head = EnergyLossHead(model, "stablemax_cross_entropy").to(DEVICE)
 
         batch = make_batch(config)
@@ -501,7 +501,7 @@ class TestEBTMode:
     def test_ebt_mode_forward(self):
         """EBT mode should produce valid logits from input_embeddings via MCMC."""
         config = make_config(mode="ebt", loops=4, mcmc_step_size=0.01)
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -522,7 +522,7 @@ class TestEBTMode:
     def test_ebt_mode_energy_decreases(self):
         """EBT MCMC should produce different logits than the zero-step baseline."""
         config = make_config(mode="ebt", loops=8, mcmc_step_size=0.01)
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -537,7 +537,7 @@ class TestEBTMode:
     def test_ebt_mode_gradients(self):
         """EBT refined logits should give gradients to energy_head via MCMC."""
         config = make_config(mode="ebt", loops=4, mcmc_step_size=0.01)
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -559,7 +559,7 @@ class TestHybridMode:
     def test_hybrid_mode_forward(self):
         """Hybrid mode should run URM steps then MCMC steps and produce valid output."""
         config = make_config(mode="hybrid", loops=8, mcmc_start_step=4, mcmc_step_size=0.01)
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -579,7 +579,7 @@ class TestHybridMode:
     def test_hybrid_mode_gradients(self):
         """Hybrid refined logits should give gradients to both URM layers and energy_head."""
         config = make_config(mode="hybrid", loops=6, mcmc_start_step=3, mcmc_step_size=0.01)
-        model = URM_Energy(config).to(DEVICE).train()
+        model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)
@@ -605,7 +605,7 @@ class TestModeURMUnchanged:
     def test_mode_urm_unchanged(self):
         """mode='urm' should produce same outputs as before (default behavior)."""
         config = make_config()  # mode defaults to "urm"
-        model = URM_Energy(config).to(DEVICE).eval()
+        model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
         carry = make_carry(model, batch)

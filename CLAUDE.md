@@ -91,7 +91,7 @@ When training with MCMC refinement, compute reconstruction loss on BOTH unrefine
 
 ### Legacy code removed
 The codebase has been streamlined to only the active experiment pipeline:
-- **Deleted models**: `models/hrm/`, `models/trm/`, `models/urm/urm.py` — the unified `models/urm/urm_energy.py` handles all modes (urm, ebt, hybrid) via `URMConfig.mode`.
+- **Deleted models**: `models/hrm/`, `models/trm/`, `models/urm/urm.py` — the unified `models/urm/urm_energy.py` handles all modes (urm, ebt, hybrid) via `ARCModelConfig.mode`.
 - **Deleted losses**: `models/dsm_loss.py`, `models/trajectory_loss.py` — DSM was unnecessary given tractable second-order gradients; contrastive-only caused energy collapse. The only energy training signal is reconstruction-through-MCMC (dual loss).
 - **Deleted configs**: all legacy arch configs (hrm, trm, urm, urm_small, urm_energy, urm_energy_small) and `cfg_eval.yaml`. Active configs: `config/arch/urm_energy_r1.yaml`, `config/arch/urm_r1_h96.yaml`.
 - **Deleted scripts**: all legacy training scripts (URM_arcagi*, URM_sudoku, baseline_small, energy_small). Active scripts: `scripts/train_r1_scale.sh`, `scripts/train_r1_h96.sh`.
@@ -100,7 +100,7 @@ The codebase has been streamlined to only the active experiment pipeline:
 - **Deleted raw data**: `kaggle/` directory (11MB raw ARC JSON) — not used by training; download from ARC-AGI repo if rebuilding the dataset.
 
 ### Three forward modes implemented
-`URMConfig.mode` controls the refinement mechanism:
+`ARCModelConfig.mode` controls the refinement mechanism:
 - **"urm"** (default): N iterations of shared-weight transformer recurrence (implicit refinement). Q-halt or fixed-step stopping.
 - **"ebt"**: N steps of MCMC gradient descent in hidden space starting from input_embeddings (explicit refinement). Energy convergence stopping. Enables Experiment R3.
 - **"hybrid"**: M URM recurrence steps then (N-M) MCMC steps, controlled by `mcmc_start_step`. Enables Experiment R4.

@@ -11,7 +11,7 @@ from models.sparse_embedding import CastedSparseEmbedding
 
 
 @dataclass
-class URMCarry:
+class ModelCarry:
     current_hidden: torch.Tensor
     steps: Optional[torch.Tensor] = None
     halted: Optional[torch.Tensor] = None
@@ -19,7 +19,7 @@ class URMCarry:
     prev_energy: Optional[torch.Tensor] = None
 
 
-class URMConfig(BaseModel):
+class ARCModelConfig(BaseModel):
     batch_size: int
     seq_len: int
     puzzle_emb_ndim: int = 0
@@ -50,8 +50,8 @@ class URMConfig(BaseModel):
     # Hybrid: number of URM steps before switching to MCMC (must be < loops)
     mcmc_start_step: int = 0
 
-class URMBlock(nn.Module):
-    def __init__(self, config: URMConfig) -> None:
+class ARCBlock(nn.Module):
+    def __init__(self, config: ARCModelConfig) -> None:
         super().__init__()
         self.self_attn = Attention(
             hidden_size=config.hidden_size,
@@ -76,8 +76,8 @@ class URMBlock(nn.Module):
         return hidden_states
 
 
-class URM_Inner(nn.Module):
-    def __init__(self, config: URMConfig) -> None:
+class ARCBackbone(nn.Module):
+    def __init__(self, config: ARCModelConfig) -> None:
         super().__init__()
         self.config = config
         self.forward_dtype = getattr(torch, self.config.forward_dtype)
@@ -110,7 +110,7 @@ class URM_Inner(nn.Module):
             base=self.config.rope_theta,
         )
 
-        self.layers = nn.ModuleList([URMBlock(self.config) for _ in range(self.config.num_layers)])
+        self.layers = nn.ModuleList([ARCBlock(self.config) for _ in range(self.config.num_layers)])
 
         self.init_hidden = nn.Buffer(
             trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1),
@@ -135,8 +135,8 @@ class URM_Inner(nn.Module):
             )
         return self.embed_scale * embedding
 
-    def empty_carry(self, batch_size: int) -> URMCarry:
-        return URMCarry(
+    def empty_carry(self, batch_size: int) -> ModelCarry:
+        return ModelCarry(
             current_hidden=torch.empty(
                 batch_size,
                 self.config.seq_len + self.puzzle_emb_len,
@@ -145,7 +145,7 @@ class URM_Inner(nn.Module):
             ),
         )
 
-    def reset_carry(self, reset_flag: torch.Tensor, carry: URMCarry) -> URMCarry:
+    def reset_carry(self, reset_flag: torch.Tensor, carry: ModelCarry) -> ModelCarry:
         new_hidden = torch.where(
             reset_flag.view(-1, 1, 1),
             self.init_hidden,
@@ -155,11 +155,11 @@ class URM_Inner(nn.Module):
 
     def forward(
         self,
-        carry: URMCarry,
+        carry: ModelCarry,
         batch: Dict[str, torch.Tensor],
         capture_trajectory: bool = False,
         capture_per_step_logits: bool = False,
-    ) -> Tuple[URMCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Tuple[ModelCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         seq_info = dict(cos_sin=self.rotary_emb())
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
 
@@ -195,11 +195,11 @@ class URM_Inner(nn.Module):
         return result
 
 
-class URM_Energy(nn.Module):
+class ARCModel(nn.Module):
     def __init__(self, config_dict: dict):
         super().__init__()
-        self.config = URMConfig(**config_dict)
-        self.inner = URM_Inner(self.config)
+        self.config = ARCModelConfig(**config_dict)
+        self.inner = ARCBackbone(self.config)
         self.energy_head = nn.Linear(self.config.hidden_size, 1, dtype=self.inner.forward_dtype)
 
     @property
@@ -227,10 +227,10 @@ class URM_Energy(nn.Module):
         energy = self.energy_head(h_pooled)
         return energy.squeeze(-1)
 
-    def initial_carry(self, batch: Dict[str, torch.Tensor]) -> URMCarry:
+    def initial_carry(self, batch: Dict[str, torch.Tensor]) -> ModelCarry:
         batch_size = batch["inputs"].shape[0]
         base = self.inner.empty_carry(batch_size)
-        return URMCarry(
+        return ModelCarry(
             current_hidden=base.current_hidden,
             steps=torch.zeros((batch_size,), dtype=torch.int32, device=batch["inputs"].device),
             halted=torch.ones((batch_size,), dtype=torch.bool, device=batch["inputs"].device),
@@ -270,10 +270,10 @@ class URM_Energy(nn.Module):
 
     def forward(
         self,
-        carry: URMCarry,
+        carry: ModelCarry,
         batch: Dict[str, torch.Tensor],
         compute_target_q=False
-    ) -> Tuple[URMCarry, Dict[str, torch.Tensor]]:
+    ) -> Tuple[ModelCarry, Dict[str, torch.Tensor]]:
         # 1. Carry management
         new_carry = self.inner.reset_carry(carry.halted, carry)
         new_steps = torch.where(carry.halted, 0, carry.steps)
@@ -390,7 +390,7 @@ class URM_Energy(nn.Module):
             outputs["per_step_delta_norms"] = per_step_delta_norms
 
         return (
-            URMCarry(
+            ModelCarry(
                 current_hidden=carry_hidden,
                 steps=new_steps,
                 halted=halted,

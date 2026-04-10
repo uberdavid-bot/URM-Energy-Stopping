@@ -2,7 +2,7 @@
 # depth=2, hidden=96, 8 recurrence steps, 10x10 grids
 # ~300K transformer params (vs ~130K at h64, ~500K at h128)
 
-name: urm.urm_energy@URM_Energy
+name: urm.urm_energy@ARCModel
 loss:
   name: losses@EnergyLossHead
   loss_type: stablemax_cross_entropy

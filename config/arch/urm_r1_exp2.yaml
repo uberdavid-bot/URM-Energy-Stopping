@@ -1,0 +1,31 @@
+# Experiment R1c: expansion=2 at h=128 — reduce MLP capacity, keep representation width
+# depth=2, hidden=128, 4 heads, expansion=2, 8 recurrence steps, 10x10 grids
+# ~330K transformer params (vs ~530K at h128/exp4, ~300K at h96/exp4)
+
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+
+loops: 8
+num_layers: 2
+hidden_size: 128
+num_heads: 4
+expansion: 2
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+# Energy stopping
+energy_threshold: 0.005
+min_steps: 8
+
+# Operational mode
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+mcmc_steps: 0
+mcmc_training: false
+
+ema: True
+ema_rate: 0.999

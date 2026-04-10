@@ -23,8 +23,6 @@ def make_config(**overrides):
         num_heads=4,
         pos_encodings="rope",
         loops=12,
-        L_cycles=1,
-        H_cycles=1,
         forward_dtype="bfloat16",
         energy_threshold=1e-6,
         min_steps=8,

@@ -35,8 +35,6 @@ class ARCModelConfig(BaseModel):
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
     loops: int
-    L_cycles: int = 1
-    H_cycles: int = 1
     forward_dtype: str = "bfloat16"
     # Energy-specific
     energy_threshold: float = 0.005

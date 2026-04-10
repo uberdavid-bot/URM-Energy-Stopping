@@ -109,7 +109,7 @@ During inference, detach between steps (no create_graph needed, saves memory).
 
 ## Recurrence Simplification
 
-Previous implementation had H_cycles (outer, mostly no_grad) and L_cycles (inner, with grad) as memory optimizations. For this project: **single loop, every step gets gradients and can be evaluated.** H_cycles=1, L_cycles=1, loop for N steps. This makes "one URM step" and "one MCMC step" directly comparable units of compute.
+Single recurrence loop — every step gets gradients and can be evaluated. The legacy H_cycles/L_cycles memory optimization has been removed from the config and model. This makes "one URM step" and "one MCMC step" directly comparable units of compute.
 
 ## Evaluator
 

@@ -13,9 +13,6 @@ hidden_size: 64
 num_heads: 4
 expansion: 4
 
-H_cycles: 1
-L_cycles: 1
-
 puzzle_emb_ndim: ${.hidden_size}
 pos_encodings: rope
 

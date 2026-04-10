@@ -116,7 +116,11 @@ pass@K (Q-halt): 0.9% @1, 1.3% @2, 2.6% @5, 6.6% @10, 12.7% @100, 15.8% @1000.
 **Conclusion:** Still too easy. Slight dip at steps 2-3 then recovery — hints of needing recurrence but variation too small.
 
 **R1-grid13 (13×13):**
-Result: TBD
+Wandb: `R1-grid13-h128-260410` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/gkglg4x5))
+epochs=2595, eval_interval=519, 446 groups, seq=169.
+Per-step accuracy: 60.1% → 59.7% → 60.1% → 60.9% → **61.2%** → 61.0% → 60.8% → 60.5% (steps 1-8). 1.4% variation. Delta norms ~0.004-0.007.
+pass@K (Q-halt): 0.7% @1, 1.1% @2, 2.9% @5, 4.3% @10, 8.0% @100, 9.4% @1000.
+**Conclusion:** Still flat. pass@K declining with grid size (harder puzzles, fewer solved) but per-step curve stays flat.
 
 **R1-grid14 (14×14):**
 Result: TBD

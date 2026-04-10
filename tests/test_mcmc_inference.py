@@ -498,7 +498,7 @@ class TestEnergyLossHeadIntegration:
 class TestEBTMode:
     def test_ebt_mode_forward(self):
         """EBT mode should produce valid logits from input_embeddings via MCMC."""
-        config = make_config(mode="ebt", loops=4, mcmc_step_size=0.01)
+        config = make_config(refinement="ebt", loops=4, mcmc_step_size=0.01)
         model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
@@ -519,7 +519,7 @@ class TestEBTMode:
 
     def test_ebt_mode_energy_decreases(self):
         """EBT MCMC should produce different logits than the zero-step baseline."""
-        config = make_config(mode="ebt", loops=8, mcmc_step_size=0.01)
+        config = make_config(refinement="ebt", loops=8, mcmc_step_size=0.01)
         model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
@@ -534,7 +534,7 @@ class TestEBTMode:
 
     def test_ebt_mode_gradients(self):
         """EBT refined logits should give gradients to energy_head via MCMC."""
-        config = make_config(mode="ebt", loops=4, mcmc_step_size=0.01)
+        config = make_config(refinement="ebt", loops=4, mcmc_step_size=0.01)
         model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
@@ -556,7 +556,7 @@ class TestEBTMode:
 class TestHybridMode:
     def test_hybrid_mode_forward(self):
         """Hybrid mode should run URM steps then MCMC steps and produce valid output."""
-        config = make_config(mode="hybrid", loops=8, mcmc_start_step=4, mcmc_step_size=0.01)
+        config = make_config(refinement="hybrid", loops=8, mcmc_start_step=4, mcmc_step_size=0.01)
         model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
@@ -576,7 +576,7 @@ class TestHybridMode:
 
     def test_hybrid_mode_gradients(self):
         """Hybrid refined logits should give gradients to both URM layers and energy_head."""
-        config = make_config(mode="hybrid", loops=6, mcmc_start_step=3, mcmc_step_size=0.01)
+        config = make_config(refinement="hybrid", loops=6, mcmc_start_step=3, mcmc_step_size=0.01)
         model = ARCModel(config).to(DEVICE).train()
 
         batch = make_batch(config)
@@ -601,8 +601,8 @@ class TestHybridMode:
 
 class TestModeURMUnchanged:
     def test_mode_urm_unchanged(self):
-        """mode='urm' should produce same outputs as before (default behavior)."""
-        config = make_config()  # mode defaults to "urm"
+        """refinement='urm' should produce same outputs as before (default behavior)."""
+        config = make_config()  # refinement defaults to "urm"
         model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)

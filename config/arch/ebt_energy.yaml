@@ -1,6 +1,6 @@
-# Experiment R1 (h96): Scale search — hidden=64 was too small (0.6% pass@1)
-# depth=2, hidden=96, 8 recurrence steps, 10x10 grids
-# ~300K transformer params (vs ~130K at h64, ~500K at h128)
+# EBT mode: explicit energy-based refinement via MCMC in hidden space
+# Pure MCMC from input_embeddings — no URM recurrence steps
+# Energy convergence stopping, energy-based pass@K ranking
 
 name: urm.urm_energy@ARCModel
 loss:
@@ -9,7 +9,7 @@ loss:
 
 loops: 8
 num_layers: 2
-hidden_size: 96
+hidden_size: 64
 num_heads: 4
 expansion: 4
 
@@ -21,11 +21,12 @@ energy_threshold: 0.005
 min_steps: 8
 
 # Operational mode
-refinement: urm
-stopping: qhalt
-ranking: qhalt
-mcmc_steps: 0
-mcmc_training: false
+refinement: ebt
+stopping: energy
+ranking: energy
+mcmc_steps: 8
+mcmc_step_size: 0.01
+mcmc_training: true
 
 ema: True
 ema_rate: 0.999

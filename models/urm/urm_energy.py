@@ -39,8 +39,12 @@ class ARCModelConfig(BaseModel):
     # Energy-specific
     energy_threshold: float = 0.005
     min_steps: int = 8
-    # Mode: "urm" (implicit recurrence), "ebt" (explicit MCMC), "hybrid" (URM then MCMC)
-    mode: str = "urm"
+    # Refinement: "urm" (implicit recurrence), "ebt" (explicit MCMC), "hybrid" (URM then MCMC)
+    refinement: str = "urm"
+    # Stopping criterion: "qhalt" (learned halt signal) | "energy" (energy convergence)
+    stopping: str = "qhalt"
+    # Ranking signal for pass@K: "qhalt" (Q-halt confidence) | "energy" (negative energy)
+    ranking: str = "qhalt"
     # MCMC training (second-order gradients through MCMC into energy head)
     mcmc_steps: int = 0
     mcmc_step_size: float = 0.01
@@ -289,7 +293,7 @@ class ARCModel(nn.Module):
         )
         per_step_logits = None
 
-        if self.config.mode == "ebt":
+        if self.config.refinement == "ebt":
             # Pure EBT: MCMC in hidden space from input_embeddings (no URM recurrence)
             hidden = input_embeddings.clone()
             unrefined_logits = self.inner.lm_head(hidden)[:, self.inner.puzzle_emb_len:]
@@ -302,7 +306,7 @@ class ARCModel(nn.Module):
             current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
             carry_hidden = hidden.detach()
 
-        elif self.config.mode == "hybrid":
+        elif self.config.refinement == "hybrid":
             # Hybrid: M URM recurrence steps, then (N-M) MCMC steps
             seq_info = dict(cos_sin=self.inner.rotary_emb())
             hidden = new_carry.current_hidden
@@ -363,7 +367,7 @@ class ARCModel(nn.Module):
         # Halting
         with torch.no_grad():
             new_steps = new_steps + 1
-            if self.config.mode == "urm":
+            if self.config.refinement == "urm":
                 halted = (new_steps >= self.config.loops)
                 if self.training and carry.prev_energy is not None:
                     energy_change = torch.abs(current_energy - carry.prev_energy)
@@ -383,7 +387,7 @@ class ARCModel(nn.Module):
         }
         if unrefined_logits is not None:
             outputs["unrefined_logits"] = unrefined_logits
-        if self.config.mode == "urm" and per_step_logits:
+        if self.config.refinement == "urm" and per_step_logits:
             outputs["per_step_logits"] = per_step_logits
             outputs["per_step_delta_norms"] = per_step_delta_norms
 

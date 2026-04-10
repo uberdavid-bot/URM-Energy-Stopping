@@ -91,21 +91,23 @@ When training with MCMC refinement, compute reconstruction loss on BOTH unrefine
 
 ### Legacy code removed
 The codebase has been streamlined to only the active experiment pipeline:
-- **Deleted models**: `models/hrm/`, `models/trm/`, `models/urm/urm.py` — the unified `models/urm/urm_energy.py` handles all modes (urm, ebt, hybrid) via `ARCModelConfig.mode`.
+- **Deleted models**: `models/hrm/`, `models/trm/`, `models/urm/urm.py` — the unified `models/urm/urm_energy.py` handles all modes via `ARCModelConfig.refinement`.
 - **Deleted losses**: `models/dsm_loss.py`, `models/trajectory_loss.py` — DSM was unnecessary given tractable second-order gradients; contrastive-only caused energy collapse. The only energy training signal is reconstruction-through-MCMC (dual loss).
-- **Deleted configs**: all legacy arch configs (hrm, trm, urm, urm_small, urm_energy, urm_energy_small) and `cfg_eval.yaml`. Active configs: `config/arch/urm_energy_r1.yaml`, `config/arch/urm_r1_h96.yaml`.
+- **Deleted configs**: all legacy arch configs (hrm, trm, urm, urm_small, urm_energy, urm_energy_small) and `cfg_eval.yaml`. Active configs: `config/arch/urm_qhalt.yaml`, `config/arch/urm_r1_h96.yaml`, `config/arch/ebt_energy.yaml`.
 - **Deleted scripts**: all legacy training scripts (URM_arcagi*, URM_sudoku, baseline_small, energy_small). Active scripts: `scripts/train_r1_scale.sh`, `scripts/train_r1_h96.sh`.
 - **Deleted data builders**: `build_maze_dataset.py`, `build_sudoku_dataset.py` — only `build_arc_dataset.py` is used.
 - **Deleted standalone tools**: `evaluate_trained_model.py`, `attn_maps_ab.py` — the training loop handles evaluation.
 - **Deleted raw data**: `kaggle/` directory (11MB raw ARC JSON) — not used by training; download from ARC-AGI repo if rebuilding the dataset.
 
-### Three forward modes implemented
-`ARCModelConfig.mode` controls the refinement mechanism:
-- **"urm"** (default): N iterations of shared-weight transformer recurrence (implicit refinement). Q-halt or fixed-step stopping.
-- **"ebt"**: N steps of MCMC gradient descent in hidden space starting from input_embeddings (explicit refinement). Energy convergence stopping. Enables Experiment R3.
-- **"hybrid"**: M URM recurrence steps then (N-M) MCMC steps, controlled by `mcmc_start_step`. Enables Experiment R4.
+### Explicit config fields for operational mode
+Three config fields control behavior (replacing the old opaque `mode` field):
+- **`refinement`**: `"urm"` (implicit recurrence) | `"ebt"` (explicit MCMC) | `"hybrid"` (URM then MCMC) — how hidden states are updated.
+- **`stopping`**: `"qhalt"` (learned halt signal) | `"energy"` (energy convergence) — when to stop iterating.
+- **`ranking`**: `"qhalt"` (Q-halt confidence) | `"energy"` (negative energy) — confidence signal for pass@K reranking.
 
-EBT and hybrid modes always halt after one forward() call (all compute happens in that call). Both use dual reconstruction loss (unrefined + refined) when training.
+Active configs: `config/arch/urm_qhalt.yaml` (refinement=urm, stopping=qhalt, ranking=qhalt), `config/arch/ebt_energy.yaml` (refinement=ebt, stopping=energy, ranking=energy).
+
+EBT and hybrid refinement modes always halt after one forward() call (all compute happens in that call). Both use dual reconstruction loss (unrefined + refined) when training.
 
 ### Per-step accuracy logging
 At eval time, URM mode captures logits at every recurrence step. EnergyLossHead computes `step_k_accuracy` metrics for each step k=1..loops, logged to wandb. Use this to determine at which step the model's predictions plateau — critical for right-sizing the model.

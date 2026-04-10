@@ -20,8 +20,10 @@ pos_encodings: rope
 energy_threshold: 0.005
 min_steps: 8
 
-# Pure URM mode — no MCMC
-mode: urm
+# Operational mode
+refinement: urm
+stopping: qhalt
+ranking: qhalt
 mcmc_steps: 0
 mcmc_training: false
 

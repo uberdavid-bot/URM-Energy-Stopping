@@ -73,7 +73,7 @@ for step in range(N):
 logits = lm_head(hidden)
 ```
 
-Explicit energy minimization: each step follows the energy gradient downhill in hidden space. Energy convergence = principled stopping. Energy value used for pass@K ranking. **Implemented** via `ARCModelConfig.mode="ebt"`.
+Explicit energy minimization: each step follows the energy gradient downhill in hidden space. Energy convergence = principled stopping. Energy value used for pass@K ranking. **Implemented** via `ARCModelConfig.refinement="ebt"`.
 
 ### Why start from input_embeddings?
 Starting from init_hidden (learned constant) means MCMC must discover the input structure from scratch via energy gradients alone. Starting from input_embeddings gives MCMC a representation that encodes *what the input is* without attention-based processing. This is analogous to the EBT paper providing context and only optimizing the prediction.
@@ -102,7 +102,13 @@ During inference, detach between steps (no create_graph needed, saves memory).
 
 **Dual reconstruction loss** (0.5/0.5 weighting) is mandatory when training with MCMC: loss on both pre-MCMC and post-MCMC logits. The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients.
 
-### Training modes (ARCModelConfig.mode)
+### Config fields
+Three explicit fields control operational mode:
+- **`refinement`**: `"urm"` | `"ebt"` | `"hybrid"` — how hidden states are updated each step.
+- **`stopping`**: `"qhalt"` | `"energy"` — when to stop iterating.
+- **`ranking`**: `"qhalt"` | `"energy"` — confidence signal for pass@K reranking.
+
+Refinement modes and their training requirements:
 - **"urm"**: Reconstruction + Q-halt loss, no energy head needed. First-order only.
 - **"ebt"**: Dual reconstruction loss. N MCMC steps from input_embeddings. Second-order gradients via create_graph=True.
 - **"hybrid"**: Dual reconstruction loss. M URM steps then (N-M) MCMC steps (controlled by `mcmc_start_step`). Second-order gradients through MCMC phase.

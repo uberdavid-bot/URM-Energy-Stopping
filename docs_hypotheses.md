@@ -149,6 +149,18 @@ pass@K (Q-halt): 0% @1, 0% @2, 2.0% @5, 3.3% @10, 7.2% @100, 9.5% @1000.
 2. **Remove input re-injection** — without re-injecting input_embeddings at each step, the model must carry all information in hidden states, potentially requiring more steps to converge.
 3. **Accept the flat curve** and proceed to R2/R3 anyway — the energy head comparison may still reveal differences in stopping/ranking even if per-step accuracy is flat.
 
+**R1-full — 80K steps on 10×10 (proper training budget)**
+Date: 2026-04-10
+Script: `scripts/train_r1_full.sh`
+Config: h=128, exp=4, depth=2, 4 heads, 8 loops, 10×10 grids, batch 512, **80K training steps** (31590 epochs), 10 eval checkpoints (every 3159 epochs), lr=3e-4 with warmup=800, lr_min_ratio=0.1, EMA 0.999.
+
+Hypothesis: The 10K-step grid sweep runs were undertrained. With cosine LR decay over only 10K steps, the LR had already decayed to near-minimum before the model finished learning — we were measuring convergence of an underfitted model, not a trained one. 80K steps gives the model a proper training budget (the original Exp 0 baseline used similar scale). The per-step convergence profile of a fully-trained model may look very different from the flat curves we saw at 10K steps.
+
+Expected outcome: Higher pass@1 (Exp 0 baseline was 15.9% composite), clearer per-step convergence curve once the model is properly trained. This is the actual R1 measurement that should have been done first.
+
+### Result
+TBD
+
 ---
 
 ### Experiment R2 — Hidden-space MCMC (fix the implementation)

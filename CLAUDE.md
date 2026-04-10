@@ -92,6 +92,8 @@ When training with MCMC refinement, compute reconstruction loss on BOTH unrefine
 ### Legacy code removed
 DSM (denoising score matching), contrastive loss, and trajectory supervision have been removed. DSM was unnecessary given tractable second-order gradients. Contrastive-only loss caused energy collapse. Trajectory supervision is a future Phase 4 extension. The only energy training signal is reconstruction-through-MCMC (dual loss). Deleted files: `models/dsm_loss.py`, `models/trajectory_loss.py`, and their associated configs/scripts.
 
+Legacy model files (`models/hrm/`, `models/trm/`, `models/urm/urm.py`) and their configs (`config/arch/hrm.yaml`, `config/arch/trm.yaml`, `config/arch/urm.yaml`, `config/arch/urm_small.yaml`) have been removed. The unified model in `models/urm/urm_energy.py` handles all modes (urm, ebt, hybrid) via `URMConfig.mode`.
+
 ### Three forward modes implemented
 `URMConfig.mode` controls the refinement mechanism:
 - **"urm"** (default): N iterations of shared-weight transformer recurrence (implicit refinement). Q-halt or fixed-step stopping.

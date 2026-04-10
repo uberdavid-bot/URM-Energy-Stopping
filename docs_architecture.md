@@ -117,8 +117,7 @@ Collects predictions across augmented puzzle versions, votes, computes pass@K. R
 
 ## File Map
 
-- `models/urm/urm_energy.py` — Energy URM: config, forward, energy computation, MCMC refinement
-- `models/urm/urm.py` — Original URM with Q-halt (reference baseline)
+- `models/urm/urm_energy.py` — Unified URM: config, forward (urm/ebt/hybrid modes), energy computation, MCMC refinement
 - `models/losses.py` — Loss heads
 - `evaluators/arc.py` — ARC evaluation with energy reranking
 - `pretrain.py` — Training loop

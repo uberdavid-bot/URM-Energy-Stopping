@@ -117,11 +117,11 @@ def load_config_from_checkpoint(checkpoint_path: Path) -> PretrainConfig:
     m = re.search(r"\bL_cycles:\s*(\d+)", raw)
     L_cycles = int(m.group(1)) if m else 6
 
-    arch_name = "urm.urm@URM"
+    arch_name = "urm.urm_energy@URM_Energy"
 
     arch_loss = {
         "loss_type": "stablemax_cross_entropy",
-        "name": "losses@ACTLossHead"
+        "name": "losses@EnergyLossHead"
     }
 
     arch = {

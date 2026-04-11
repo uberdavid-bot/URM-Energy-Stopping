@@ -9,21 +9,22 @@
 ### Memory Budget
 | Configuration | Approx VRAM | Notes |
 |--------------|-------------|-------|
-| hidden=64 depth=2, batch 512, no MCMC | ~2-3 GB (est.) | Confirm in Phase 1 |
-| hidden=64 depth=2, batch 512, create_graph=True | ~8-12 GB (est.) | Confirm in Phase 1 |
+| URM only, no energy head | ~2-3 GB (est.) | Confirm in Phase 1 |
+| URM + trajectory energy (first-order) | ~3-5 GB (est.) | R2: energy head adds minimal overhead |
+| URM + MCMC (create_graph=True) | ~8-12 GB (est.) | R3: second-order gradients scale with MCMC steps |
 | hidden=128 depth=2, batch 512, create_graph=True | ~19 GB | Measured (previous experiments) |
 
-Note: hidden=64 is 4x fewer parameters than hidden=128. Second-order gradient memory should scale roughly proportionally, leaving significant headroom for non-detached multi-step MCMC.
+Note: R2 (trajectory supervision, first-order only) should train at nearly URM speed. Second-order gradients are only needed in R3.
 
 ### Throughput
 To be re-measured at new model scale. Previous measurements at hidden=128:
 | Mode | Speed | 10K steps in |
 |------|-------|-------------|
 | URM (no energy) | ~6.5 it/s | ~26 min |
-| Energy (no MCMC) | ~3.5 it/s | ~48 min |
+| Energy (first-order, no MCMC) | ~3.5 it/s | ~48 min |
 | Energy + MCMC (create_graph) | ~0.66 it/s | ~4.2 hrs |
 
-Expect all to be faster at hidden=64. Re-measure after Phase 1.
+Expect all to be faster at right-sized model. Re-measure after Phase 1.
 
 ## Training Budget
 - **Fixed**: 10,000 steps per experiment
@@ -35,13 +36,18 @@ Expect all to be faster at hidden=64. Re-measure after Phase 1.
 
 ### Energy collapse
 - **Symptom**: Energy gap → 0, E(true) ≈ E(predicted)
-- **Cause**: Contrastive loss alone finds trivial solution
-- **Fix**: Train energy via reconstruction-through-MCMC (optimization-based training), not contrastive loss alone
+- **Cause**: Contrastive loss alone finds trivial solution (Exp 1)
+- **Fix**: Use trajectory ranking loss (dense, ordered, anti-collapse by construction)
 
 ### URM degradation from refined-only loss
 - **Symptom**: 0% test accuracy, train accuracy drops
 - **Cause**: Reconstruction loss only on MCMC-refined logits
 - **Fix**: Dual reconstruction loss (unrefined + refined). Non-negotiable.
+
+### Trajectory quality spread collapse
+- **Symptom**: Active ranking pairs → 0, trajectory_quality_first ≈ trajectory_quality_last
+- **Cause**: Over-parameterized model converges in 1-2 steps, leaving no quality spread for energy head training (Exp 4)
+- **Fix**: Right-size the model (Phase 1 / R1) so quality spread persists throughout training. Co-train energy head with URM (not sequential).
 
 ### Soft-embedding MCMC (ELIMINATED)
 - **Symptom**: mcmc_improvement = 0 despite correct training setup
@@ -66,3 +72,4 @@ Expect all to be faster at hidden=64. Re-measure after Phase 1.
 - **Do not use `(base)` conda environment.** Always `conda activate urm`.
 - **Do not do MCMC in soft-embedding space.** Always in hidden space.
 - **Do not detach between MCMC steps during training.** Energy head needs multi-step gradient flow.
+- **Do not train energy head sequentially on frozen URM.** Quality spread only exists while URM is learning. Co-train.

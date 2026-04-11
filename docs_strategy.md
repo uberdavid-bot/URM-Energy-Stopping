@@ -14,49 +14,80 @@ This project implements both approaches in a shared architecture (same backbone,
 **Baseline URM (urm_small)**: 15.9% composite at 10K steps (hidden=128, depth=2).
 This was with an over-parameterized model that converges in 1-2 recurrence steps on 10×10 grids.
 
-## Phase 1: Find the Right Scale
+## Experiment Sequence
+
+### Phase 1: Find the Right Scale (R1) — IN PROGRESS
 Strip H_cycles/L_cycles to a single loop with per-step evaluation. Reduce model capacity until URM needs most of its step budget to converge.
 
-Starting point: depth=2, hidden=64, 8 total steps, 10×10 grids.
+Starting point: depth=2, hidden=64, 8 total steps, 10×10 grids. Also testing hidden=96, hidden=128 with expansion=2.
 
-Success criterion: URM accuracy should be meaningfully improving between steps 4 and 8, not plateauing at step 2. If hidden=64 still converges too fast, try hidden=48 or hidden=32.
+Success criterion: URM accuracy should be meaningfully improving between steps 4 and 8, not plateauing at step 2. This is the prerequisite for all subsequent experiments — without persistent quality spread across the trajectory, the energy head has no training signal.
 
-## Phase 2: Fix MCMC Implementation
-Two critical bugs in the current implementation:
-1. **MCMC operates in soft-embedding space, not hidden space.** The current code does `softmax(logits) @ embed_tokens.weight` to create a "soft embedding," then takes energy gradients w.r.t. that. This collapses 128d hidden states to an 11-dimensional simplex (12 vocab tokens), and feeds lm_head an input distribution it was never trained on. Fix: take energy gradients w.r.t. hidden states directly, which is what compute_joint_energy already expects.
-2. **Detached gradients between MCMC steps.** The current code calls `predicted_emb.detach().requires_grad_(True)` inside the MCMC loop, breaking the computational graph across steps. The energy head only learns from single-step gradients, not multi-step trajectories. Fix: make detach optional (default off for training, on for inference if memory-constrained).
+### Phase 2: Train Energy as Verifier via Trajectory Supervision (R2)
+Co-train the energy head alongside URM using trajectory ranking loss. No MCMC, no second-order gradients — first-order only.
 
-## Phase 3: Core Comparison
-Given N total steps of compute, compare:
-- **N URM steps** (baseline): implicit refinement via recurrence, Q-halt stopping, Q-halt confidence for pass@K ranking.
-- **N MCMC steps** (pure EBT): explicit refinement via energy gradient descent in hidden space, starting from input_embeddings (not init_hidden — give MCMC the input representation, just unprocessed by attention). Energy convergence stopping, energy confidence for pass@K ranking.
+**Why trajectory supervision, not MCMC-based training:**
+- MCMC improvement > 0 is the hardest thing to achieve and has the most uncertainty.
+- Trajectory ranking is supervised learning — straightforward and stable.
+- Exp 4 proved the concept works when quality spread exists; Exp 4 failed only because the over-parameterized model converged too fast (quality spread collapsed). R1 fixes this prerequisite.
+- Co-training (not sequential) is required because quality spread is highest when the model is still learning. A frozen URM that already converges has no spread to supervise on.
 
-Both use the same backbone, energy head, and lm_head. The only difference is the refinement mechanism.
+**Trajectory ranking loss design (from Exp 4, refined):**
+- All-pairs weighted margin loss across URM steps: quality_gap * F.relu(E(better) - E(worse) + margin)
+- N steps → N*(N-1)/2 ordered pairs (120 pairs for N=16)
+- Natural anti-collapse: 120+ pairs requiring different energy values makes collapse structurally hard
+- No contrastive loss needed as primary signal (trajectory ranking subsumes it)
 
-Metrics to compare: pass@K (all K values), composite metric, per-step accuracy curves, energy landscape quality (gap between correct/incorrect predictions).
+**Stabilization tricks from literature:**
+- Log energy-accuracy Spearman correlation from step 0 as early diagnostic (IREM Fig. 5)
+- Separate gradient clipping for energy head (max_norm=1.0) vs backbone (max_norm=5.0)
+- Position-aware energy head (optional, try if correlation is weak after 2K steps)
 
-## Phase 4: Hybrid (if pure EBT underperforms)
-If pure EBT can't match URM (likely — ARC may require attention-based processing that gradients alone can't replicate), test:
-- **M URM steps + (N-M) MCMC steps**: URM provides a reasonable initialization, MCMC refines explicitly.
-- Trajectory supervision from the URM steps can provide additional training signal for the energy landscape.
+Success criterion: Energy-accuracy correlation remains strong throughout training (not just first few K steps). Active pairs in trajectory ranking loss stay high.
 
-This becomes the interesting result — explicit refinement as complement to implicit recurrence.
+### Phase 2.5: Energy Reranking + Stopping (R2.5) — EVAL ONLY
+No new training. Use the R2-trained energy head to:
+1. Rerank URM pass@K candidates by energy score. Compare to Q-halt ranking.
+2. Use energy convergence as stopping criterion. Compare to Q-halt stopping.
+
+This is a single eval script — score existing URM samples with the energy head.
+
+Success criterion: Energy reranking improves pass@K over Q-halt on at least some K values. If so, this is the first publishable result: "learned energy verification beats learned halting for iterative reasoning."
+
+### Phase 3: MCMC Refinement (R3) — CONDITIONAL ON R2.5
+Now that the energy landscape has validated structure, test whether its gradients can drive refinement.
+
+Trade off URM steps for MCMC steps: M URM + K MCMC at matched total compute (M+K = N). Start with M = N-2 (most URM, little MCMC) and decrease M.
+
+This is where second-order gradient tricks become relevant:
+- Langevin noise during training: `hidden = hidden - step_size * grad + noise_scale * randn_like(hidden)` (drop noise at inference)
+- Step size annealing across MCMC trajectory: `step_size * (1 - t/T)` (IRED-inspired coarse-to-fine)
+- Separate gradient clipping for energy head
+- No detach between MCMC steps during training (create_graph=True)
+
+Success criterion: mcmc_improvement > 0 (refined predictions better than unrefined at same checkpoint). Hybrid accuracy > pure URM accuracy at matched total steps.
+
+### Phase 3b: Pure EBT Ablation (R3b) — OPTIONAL
+Pure EBT (all MCMC, no URM steps) only if R3 shows MCMC refinement works. Use 1 URM step as initialization (counted in total budget) since cold start from input_embeddings is extremely unlikely to work on discrete ARC grids. This is an ablation for the paper, not a primary experiment.
 
 ## Dead Ends (from prior experiments)
-- **Contrastive loss as sole energy training signal**: energy collapse to trivial solution (Exp 1)
+- **Contrastive loss as sole energy training signal**: energy collapse to trivial solution (Exp 1). Trajectory ranking subsumes contrastive and doesn't collapse.
 - **Refined-only reconstruction loss with MCMC**: destroys URM learning (Exp 3a)
-- **MCMC on top of fully-converged URM**: no room for improvement (Exp 3b) — though soft-embedding bug may have contributed
-- **Over-parameterized model on easy grids**: converges too fast for any refinement to help
+- **MCMC on top of fully-converged URM**: no room for improvement (Exp 3b, Exp 4)
+- **Over-parameterized model on easy grids**: converges too fast for any refinement to help. Quality spread collapses → trajectory signal dies.
 - **DSM (denoising score matching)**: unnecessary given tractable second-order gradients, trains on wrong distribution
+- **Sequential training (freeze URM, then train energy)**: quality spread only exists during URM learning. Co-training is required.
 
 ## Key Architectural Decisions
 - **Energy in hidden space**: E(input_embeddings, hidden) where both are [B, seq_len, hidden_dim]. No soft-embedding bridge.
-- **Dual reconstruction loss**: mandatory when training with MCMC. Unrefined + refined logits both get reconstruction loss.
+- **Trajectory ranking loss** as primary energy training signal: dense, ordered, anti-collapse.
 - **Single recurrence loop**: no H_cycles/L_cycles distinction. Every step gets gradients and evaluation.
 - **Matched compute comparison**: always compare with equal total steps, never "free" extra compute.
+- **Co-train energy head with URM**: energy head sees diverse trajectories while URM is still learning.
 
 ## Open Questions
-- Does the energy landscape over hidden states learn useful structure for ARC puzzles?
+- Does the energy landscape over hidden states learn useful structure for ARC puzzles when trained via trajectory ranking?
 - Is energy-based reranking better than Q-halt reranking given a well-trained energy function?
 - How many MCMC steps does it take to match one URM recurrence step? (compute efficiency)
 - Does explicit energy help more on harder puzzles within the 10×10 distribution?
+- Can MCMC gradients from a trajectory-trained energy head actually improve predictions, or is the energy function only useful as a verifier?

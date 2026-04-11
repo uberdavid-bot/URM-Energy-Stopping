@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from models.trajectory_loss import trajectory_ranking_loss
+
 
 IGNORE_LABEL_ID = -100
 
@@ -38,10 +40,12 @@ def softmax_cross_entropy(logits, labels, ignore_index: int = -100):
 
 
 class EnergyLossHead(nn.Module):
-    def __init__(self, model: nn.Module, loss_type: str):
+    def __init__(self, model: nn.Module, loss_type: str, energy_loss_weight: float = 0.0, ranking_margin: float = 0.1):
         super().__init__()
         self.model = model
         self.loss_fn = globals()[loss_type]
+        self.energy_loss_weight = energy_loss_weight
+        self.ranking_margin = ranking_margin
 
     def forward(
         self,
@@ -92,6 +96,14 @@ class EnergyLossHead(nn.Module):
         lm_loss = total_recon_loss / weight_sum
         qhalt_loss_avg = total_qhalt_loss / weight_sum
         total_loss = lm_loss + 0.5 * qhalt_loss_avg
+
+        # R2: Trajectory ranking loss for energy head co-training
+        ranking_metrics = None
+        if self.energy_loss_weight > 0:
+            ranking_loss, ranking_metrics = trajectory_ranking_loss(
+                self.model, all_hidden, all_logits, labels, input_embeddings, self.ranking_margin
+            )
+            total_loss = total_loss + self.energy_loss_weight * ranking_loss
 
         # --- Metrics (no_grad) ---
         with torch.no_grad():
@@ -185,6 +197,11 @@ class EnergyLossHead(nn.Module):
                 e_stop_idx = (e_first_conv - 1).long().clamp(0, N - 1)
                 e_stop_correct = step_exact.gather(1, e_stop_idx.unsqueeze(1)).squeeze(1)
                 metrics["energy_stop_accuracy"] = (valid & e_stop_correct).sum()
+
+            # R2: Trajectory ranking metrics (scale by count for distributed reduction)
+            if ranking_metrics is not None:
+                for k, v in ranking_metrics.items():
+                    metrics[k] = v * metrics["count"]
 
         # --- Return outputs ---
         returned_outputs: Dict[str, torch.Tensor] = {}

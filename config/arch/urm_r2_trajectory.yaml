@@ -1,0 +1,28 @@
+# R2: URM + trajectory ranking loss for energy head training
+# Same backbone as R1h (d=1, h=64, exp=2), adding energy training
+
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+  energy_loss_weight: 0.1
+  ranking_margin: 0.1
+
+loops: 8
+num_layers: 1
+hidden_size: 64
+num_heads: 4
+expansion: 2
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+energy_threshold: 0.005
+min_steps: 8
+
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+
+ema: True
+ema_rate: 0.999

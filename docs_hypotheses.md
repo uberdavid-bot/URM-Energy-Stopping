@@ -311,8 +311,9 @@ Stopping metrics: qhalt_stop_step=7.5 (2.6% acc), energy_stop_step=6.3 (3.2% acc
 ---
 
 ### Experiment R2 — Energy verifier via trajectory ranking (first-order)
-Date: TBD
-Config: Same backbone as R1h (d=1, h=64, exp=2, 8 steps). Co-train energy head alongside URM using trajectory ranking loss. First-order only — no MCMC, no create_graph=True. All-pairs weighted margin loss across URM trajectory steps: quality_gap * F.relu(E(better) - E(worse) + margin). Separate gradient clipping: energy head max_norm=1.0, backbone max_norm=5.0.
+Date: 2026-04-11
+Script: `scripts/train_r2_trajectory.sh`
+Config: `config/arch/urm_r2_trajectory.yaml` — Same backbone as R1h (d=1, h=64, exp=2, 8 steps). Co-train energy head alongside URM using trajectory ranking loss. First-order only — no MCMC, no create_graph=True. All-pairs weighted margin loss across URM trajectory steps: quality_gap * F.relu(E(better) - E(worse) + margin). energy_loss_weight=0.1, ranking_margin=0.1. Separate gradient clipping: energy head max_norm=1.0, backbone max_norm=5.0.
 Hypothesis: The energy head, trained via trajectory ranking on URM hidden states, learns to assign lower energy to better hidden states (higher reconstruction accuracy). This produces a verifier that outperforms Q-halt for pass@K reranking — without requiring any MCMC or second-order gradients.
 Expected outcome: Energy-accuracy Spearman correlation > 0.5 throughout training. Active ranking pairs stay > 30% of 28 total. Energy reranking improves pass@K over Q-halt at some K values.
 Key diagnostics to log:

@@ -128,6 +128,9 @@ class PretrainConfig(pydantic.BaseModel):
     ema: bool = False
     ema_rate: float = 0.999
 
+    grad_clip_backbone: float = 5.0
+    grad_clip_energy_head: float = 1.0
+
 
 
 @dataclass
@@ -500,6 +503,17 @@ def train_batch(
             if grad is None:
                 grad = torch.zeros_like(param)
             dist.all_reduce(grad)
+
+    # Separate gradient clipping for energy head vs backbone
+    if config.grad_clip_backbone > 0 or config.grad_clip_energy_head > 0:
+        energy_head_params = [p for n, p in train_state.model.named_parameters()
+                              if 'energy_head' in n and p.grad is not None]
+        backbone_params = [p for n, p in train_state.model.named_parameters()
+                           if 'energy_head' not in n and p.grad is not None]
+        if backbone_params and config.grad_clip_backbone > 0:
+            torch.nn.utils.clip_grad_norm_(backbone_params, config.grad_clip_backbone)
+        if energy_head_params and config.grad_clip_energy_head > 0:
+            torch.nn.utils.clip_grad_norm_(energy_head_params, config.grad_clip_energy_head)
 
     # Apply optimizer
     lr_this_step = None

@@ -46,46 +46,47 @@ After N steps: logits = lm_head(hidden) → predictions
 - RoPE sized for 2 × seq_len + puzzle_emb_len
 - **Optional upgrade**: position-aware energy head (per-position energy contributions summed rather than pool-then-project). Try if energy-accuracy correlation is weak in R2.
 
-## URM Mode
+## Refinement Modes
 
+All modes do **one step per `forward()` call**. The outer loop (pretrain.py) handles iteration and halting identically for all modes.
+
+### URM Mode (`refinement="urm"`)
 ```python
-hidden = init_hidden  # learned constant buffer
-for step in range(N):
-    hidden = hidden + input_embeddings        # re-inject input
-    hidden = transformer_layers(hidden)       # shared weights
-    logits = lm_head(hidden)
-    q_logits = q_head(hidden[:, 0])           # halt/continue prediction
-    if should_halt(q_logits): break
+# One step per forward() call:
+hidden = hidden + input_embeddings        # re-inject input
+hidden = transformer_layers(hidden)       # shared weights
+logits = lm_head(hidden)
+energy = compute_joint_energy(input_embeddings, hidden)
 ```
+Implicit energy minimization: each transformer pass pushes hidden toward a fixed point. Q-halt confidence used for pass@K ranking.
 
-Implicit energy minimization: each transformer pass pushes hidden toward a fixed point that balances input structure with learned priors. Q-halt detects convergence. Q-halt confidence used for pass@K ranking.
-
-## EBT Mode (Hybrid: M URM + K MCMC)
-
-The primary EBT configuration is hybrid — M URM steps followed by K MCMC steps, with M+K = N (matched compute). Controlled by `ARCModelConfig.refinement="hybrid"` and `mcmc_start_step`.
-
+### EBT Mode (`refinement="ebt"`)
 ```python
-# Phase 1: URM initialization (M steps)
-hidden = init_hidden
-for step in range(M):
-    hidden = hidden + input_embeddings
-    hidden = transformer_layers(hidden)
-
-# Phase 2: MCMC refinement (K steps)
-for step in range(K):
-    hidden = hidden.requires_grad_(True)      # (don't detach during training)
-    energy = compute_joint_energy(input_embeddings, hidden)
-    grad = autograd.grad(energy.sum(), hidden, create_graph=True)[0]
-    grad = grad / grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    step_size_t = step_size * (1 - step / K)  # annealed step size
-    hidden = hidden - step_size_t * grad
-    # Langevin noise (training only):
-    # hidden = hidden + noise_scale * torch.randn_like(hidden)
-    if energy_converged(energy, prev_energy): break
+# One step per forward() call:
+energy = compute_joint_energy(input_embeddings, hidden)
+grad = autograd.grad(energy.sum(), hidden, create_graph=True)[0]
+grad = grad / grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+hidden = hidden - step_size * grad
 logits = lm_head(hidden)
 ```
+Explicit energy minimization: each step follows the energy gradient in hidden space. create_graph=True during training for second-order gradient flow into the energy head. Detach between steps at inference.
 
-Pure EBT (N MCMC steps from input_embeddings, no URM steps) is also supported via `refinement="ebt"` but is an optional ablation (R3b), not the primary experiment.
+### Hybrid Mode (`refinement="hybrid"`)
+```python
+# One step per forward() call — mode depends on step count:
+if steps < mcmc_start_step:
+    # URM phase: transformer pass
+    hidden = hidden + input_embeddings
+    hidden = transformer_layers(hidden)
+else:
+    # MCMC phase: energy gradient step
+    grad = autograd.grad(energy.sum(), hidden, create_graph=True)[0]
+    hidden = hidden - step_size * grad
+logits = lm_head(hidden)
+```
+M URM steps then (N-M) MCMC steps, controlled by `mcmc_start_step`. Transitions cleanly mid-sequence.
+
+Pure EBT (N MCMC steps, no URM) is supported via `refinement="ebt"`. Hybrid is the primary comparison (R3).
 
 ### Why hybrid, not pure EBT?
 - IREM (Du et al., 2022) showed energy minimization struggles when initialization is far from solution.
@@ -147,15 +148,15 @@ for i, j in all_pairs where q_i > q_j:
 
 ### Config fields
 Three explicit fields control operational mode:
-- **`refinement`**: `"urm"` | `"ebt"` | `"hybrid"` — how hidden states are updated each step.
+- **`refinement`**: `"urm"` | `"ebt"` | `"hybrid"` — what one step does.
 - **`stopping`**: `"qhalt"` | `"energy"` — when to stop iterating.
 - **`ranking`**: `"qhalt"` | `"energy"` — confidence signal for pass@K reranking.
 
 Training requirements by refinement mode:
-- **"urm"**: Reconstruction + Q-halt loss, no energy head needed. First-order only.
-- **"urm" + trajectory energy (R2)**: Reconstruction + Q-halt + trajectory ranking loss. First-order only. Co-trained.
-- **"ebt"**: Dual reconstruction loss. N MCMC steps from input_embeddings. Second-order gradients via create_graph=True.
-- **"hybrid" (R3)**: Dual reconstruction + trajectory ranking. M URM steps then (N-M) MCMC steps (controlled by `mcmc_start_step`). Second-order gradients through MCMC phase.
+- **"urm"**: Reconstruction + Q-halt loss. First-order only.
+- **"urm" + trajectory energy (R2, planned)**: Reconstruction + Q-halt + trajectory ranking loss. First-order only. Co-trained.
+- **"ebt"**: Reconstruction loss. Second-order gradients via create_graph=True.
+- **"hybrid" (R3, planned)**: Reconstruction + trajectory ranking. URM then MCMC (controlled by `mcmc_start_step`). Second-order gradients through MCMC phase.
 
 ## Energy Reranking (R2.5 — eval only)
 

@@ -11,17 +11,22 @@ EBT-style refinement is *explicit* energy minimization — a learned scalar ener
 This project implements both approaches in a shared architecture (same backbone, same embeddings, same lm_head) and compares them with matched compute budgets. The goal is not to prove one is universally better, but to characterize when explicit energy adds value over implicit recurrence for discrete reasoning tasks.
 
 ## Current Best Result
-**Baseline URM (urm_small)**: 15.9% composite at 10K steps (hidden=128, depth=2).
-This was with an over-parameterized model that converges in 1-2 recurrence steps on 10×10 grids.
+**R1-full URM (h=128, exp=4, depth=2)**: 25.3% pass@1, 85.9% token accuracy at 80K steps on 10×10 grids. Per-step convergence is flat (model reaches fixed point in 1 step at this capacity). Prior R1a-R1g results were invalidated by an 8×8=64 inner/outer loop bug (now fixed). R1 re-runs with corrected architecture (one step per forward() call) are in progress.
 
 ## Experiment Sequence
 
 ### Phase 1: Find the Right Scale (R1) — IN PROGRESS
-Strip H_cycles/L_cycles to a single loop with per-step evaluation. Reduce model capacity until URM needs most of its step budget to converge.
+Simplified architecture: one step per `forward()` call for all modes (URM, EBT, hybrid). Outer loop handles iteration, halting, and per-step metric collection identically for all modes.
 
-Starting point: depth=2, hidden=64, 8 total steps, 10×10 grids. Also testing hidden=96, hidden=128 with expansion=2.
+Current sweep (R1 re-run): 4 configs at 80K steps on 10×10 grids with constant LR:
+- d=1, h=64, exp=2 (~34K params)
+- d=1, h=128, exp=2 (~134K params)
+- d=1, h=128, exp=4 (~266K params)
+- d=2, h=128, exp=4 (~398K params)
 
-Success criterion: URM accuracy should be meaningfully improving between steps 4 and 8, not plateauing at step 2. This is the prerequisite for all subsequent experiments — without persistent quality spread across the trajectory, the energy head has no training signal.
+Looking for: step_1 exact accuracy < step_8 exact accuracy (multi-step convergence), with delta norms decreasing per step.
+
+Success criterion: URM accuracy should be meaningfully improving between steps 1 and 8, not plateauing at step 1. This is the prerequisite for all subsequent experiments — without persistent quality spread across the trajectory, the energy head has no training signal.
 
 ### Phase 2: Train Energy as Verifier via Trajectory Supervision (R2)
 Co-train the energy head alongside URM using trajectory ranking loss. No MCMC, no second-order gradients — first-order only.

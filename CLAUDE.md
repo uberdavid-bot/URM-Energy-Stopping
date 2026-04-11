@@ -47,7 +47,7 @@ The specific hypotheses under test:
 4. **Complementarity**: Can MCMC refinement improve predictions beyond what URM recurrence achieves when used as a second stage (hybrid architecture)?
 
 ## Hardware Environment
-Single NVIDIA RTX 3090 (24GB VRAM), home lab. All experiments must fit in this envelope. Training budget: 10K steps per experiment. Second-order gradients (create_graph=True) are tractable at this model scale. Target model: depth=2, hidden=64, ~130K transformer params on 10×10 grids.
+Single NVIDIA RTX 3090 (24GB VRAM), home lab. All experiments must fit in this envelope. Training budget: 80K steps per experiment (constant LR after 100-step warmup). Second-order gradients (create_graph=True) are tractable at this model scale. Current R1 sweep: depth=1-2, hidden=64-128, expansion=2-4 on 10×10 grids.
 
 ## Success Criteria
 - **Minimum**: Clear characterization of when explicit energy helps vs. when implicit recurrence is sufficient. Energy reranking improves pass@K over Q-halt on matched architecture.
@@ -92,28 +92,27 @@ When training with MCMC refinement, compute reconstruction loss on BOTH unrefine
 ### Legacy code removed
 The codebase has been streamlined to only the active experiment pipeline:
 - **Deleted models**: `models/hrm/`, `models/trm/`, `models/urm/urm.py` — the unified `models/urm/urm_energy.py` handles all modes via `ARCModelConfig.refinement`.
-- **Deleted losses**: `models/dsm_loss.py`, `models/trajectory_loss.py` — DSM was unnecessary given tractable second-order gradients; contrastive-only caused energy collapse. The only energy training signal is reconstruction-through-MCMC (dual loss).
-- **Deleted configs**: all legacy arch configs (hrm, trm, urm, urm_small, urm_energy, urm_energy_small) and `cfg_eval.yaml`. Active configs: `config/arch/urm_qhalt.yaml`, `config/arch/urm_r1_h96.yaml`, `config/arch/ebt_energy.yaml`.
-- **Deleted scripts**: all legacy training scripts (URM_arcagi*, URM_sudoku, baseline_small, energy_small). Active scripts: `scripts/train_r1_scale.sh`, `scripts/train_r1_h96.sh`.
-- **Deleted data builders**: `build_maze_dataset.py`, `build_sudoku_dataset.py` — only `build_arc_dataset.py` is used.
-- **Deleted standalone tools**: `evaluate_trained_model.py`, `attn_maps_ab.py` — the training loop handles evaluation.
-- **Deleted raw data**: `kaggle/` directory (11MB raw ARC JSON) — not used by training; download from ARC-AGI repo if rebuilding the dataset.
+- **Deleted losses**: `models/dsm_loss.py`, `models/trajectory_loss.py` — DSM was unnecessary given tractable second-order gradients; contrastive-only caused energy collapse.
+- **Simplified model**: Removed `inner_loops`, `_mcmc_steps()` (multi-step), `refine_with_mcmc()`, `capture_per_step_logits` infrastructure, `mcmc_steps`/`mcmc_training` config fields. All modes now do one step per `forward()` call.
+- **MLP rounding fix**: `_find_multiple` granularity changed from 256 to 8 in `models/layers.py` to allow smooth capacity scaling at small model sizes (at h=64/exp=2, inter=88 instead of 256).
+- **Active configs**: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, plus R1 experiment configs.
+- **Active scripts**: `scripts/run_r1_rerun.sh` (current sweep), plus individual experiment scripts in `scripts/`.
 
-### Explicit config fields for operational mode
-Three config fields control behavior (replacing the old opaque `mode` field):
-- **`refinement`**: `"urm"` (implicit recurrence) | `"ebt"` (explicit MCMC) | `"hybrid"` (URM then MCMC) — how hidden states are updated.
+### Unified one-step-per-call architecture
+All three refinement modes do exactly one step of work per `forward()` call. The outer loop (pretrain.py) calls `forward()` repeatedly until `steps >= loops`, with identical halting logic and per-step metric collection for all modes.
+
+Three config fields control behavior:
+- **`refinement`**: `"urm"` (one transformer pass) | `"ebt"` (one MCMC gradient step) | `"hybrid"` (URM if steps < mcmc_start_step, else MCMC) — what one step does.
 - **`stopping`**: `"qhalt"` (learned halt signal) | `"energy"` (energy convergence) — when to stop iterating.
 - **`ranking`**: `"qhalt"` (Q-halt confidence) | `"energy"` (negative energy) — confidence signal for pass@K reranking.
 
-Active configs: `config/arch/urm_qhalt.yaml` (refinement=urm, stopping=qhalt, ranking=qhalt), `config/arch/ebt_energy.yaml` (refinement=ebt, stopping=energy, ranking=energy).
+Active configs: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, plus R1 experiment configs (`urm_r1g_d1_h64.yaml`, `urm_r1f_d1.yaml`, `urm_r1h_d1_h128_exp4.yaml`, `urm_r1_15x15.yaml`).
 
-EBT and hybrid refinement modes always halt after one forward() call (all compute happens in that call). Both use dual reconstruction loss (unrefined + refined) when training.
-
-### Per-step accuracy logging
-At eval time, URM mode captures logits at every recurrence step. EnergyLossHead computes `step_k_accuracy` metrics for each step k=1..loops, logged to wandb. Use this to determine at which step the model's predictions plateau — critical for right-sizing the model.
+### Per-step exact accuracy logging
+At eval time, per-step metrics are computed in the outer eval loop in `pretrain.py` (not inside the model). Each outer halting step produces `step_k_exact_accuracy` (full puzzle solve rate) and `step_k_delta_norm` (hidden state change), logged to wandb under the `all.*` namespace. Use this to determine at which step the model's predictions plateau — critical for right-sizing the model.
 
 ### Right-size the model for the problem
-The model must need most of its step budget to converge. At hidden=128, the URM converges in 1-2 steps on 10×10 grids, leaving no room for refinement to help. Target: hidden=64, depth=2, where accuracy should meaningfully improve between steps 4 and 8. Run R1 experiment: `scripts/train_r1_scale.sh`.
+The model must need most of its step budget to converge. Prior R1 experiments (all invalidated by the 8×8=64 bug, now fixed) showed flat per-step curves at depth=2 regardless of capacity. Current R1 re-run sweeps depth=1-2 with h=64-128 at 80K steps to find the right capacity where multi-step convergence emerges.
 
 ## Setup
 

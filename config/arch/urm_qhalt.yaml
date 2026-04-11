@@ -8,7 +8,6 @@ loss:
   loss_type: stablemax_cross_entropy
 
 loops: 8
-inner_loops: 1
 num_layers: 2
 hidden_size: 64
 num_heads: 4
@@ -25,8 +24,6 @@ min_steps: 8
 refinement: urm
 stopping: qhalt
 ranking: qhalt
-mcmc_steps: 0
-mcmc_training: false
 
 ema: True
 ema_rate: 0.999

@@ -104,25 +104,23 @@ During inference, detach between steps (no create_graph needed, saves memory).
 
 ### Config fields
 Three explicit fields control operational mode:
-- **`refinement`**: `"urm"` | `"ebt"` | `"hybrid"` — how hidden states are updated each step.
+- **`refinement`**: `"urm"` | `"ebt"` | `"hybrid"` — what one step does.
 - **`stopping`**: `"qhalt"` | `"energy"` — when to stop iterating.
 - **`ranking`**: `"qhalt"` | `"energy"` — confidence signal for pass@K reranking.
 
-Refinement modes and their training requirements:
-- **"urm"**: Reconstruction + Q-halt loss, no energy head needed. First-order only.
-- **"ebt"**: Dual reconstruction loss. N MCMC steps from input_embeddings. Second-order gradients via create_graph=True.
-- **"hybrid"**: Dual reconstruction loss. M URM steps then (N-M) MCMC steps (controlled by `mcmc_start_step`). Second-order gradients through MCMC phase.
+Refinement modes (all do one step per `forward()` call):
+- **"urm"**: One transformer pass (input re-injection + shared-weight layers). First-order only.
+- **"ebt"**: One MCMC gradient step in hidden space. Second-order gradients via create_graph=True during training.
+- **"hybrid"**: URM pass if `steps < mcmc_start_step`, else MCMC step. Transitions cleanly from URM to MCMC mid-sequence.
 
 ## Recurrence Structure
 
-Two config fields control recurrence:
-- **`loops`**: Outer halting threshold — total recurrence steps before the model halts. The training/eval loop calls `ARCModel.forward()` repeatedly until `steps >= loops`.
-- **`inner_loops`**: Transformer passes per outer call — how many times `ARCBackbone.forward()` iterates through the shared-weight layers in a single call. Default 1.
+One config field controls recurrence:
+- **`loops`**: Total recurrence steps before halting. The outer loop (pretrain.py) calls `ARCModel.forward()` repeatedly until `steps >= loops`.
 
-With `inner_loops=1, loops=8`: 8 outer calls × 1 inner pass = 8 total recurrence passes, each producing per-step metrics.
-With `inner_loops=8, loops=8` (legacy bug): 8 outer calls × 8 inner passes = 64 total passes, per-step metrics only captured the last 8.
+Each `forward()` call does exactly one step of work (one transformer pass for URM, one gradient step for EBT). Per-step exact accuracy and delta norms are computed in the outer eval loop in pretrain.py, giving step_1..step_N metrics that reflect each recurrence step.
 
-Per-step logits and delta norms are captured inside `ARCBackbone.forward()` (the inner loop), so `inner_loops` must be 1 for per-step metrics to reflect each total recurrence step.
+All three modes use the same halting logic and the same outer loop, making per-step metrics directly comparable across URM, EBT, and hybrid.
 
 ## Evaluator
 

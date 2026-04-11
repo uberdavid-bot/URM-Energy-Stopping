@@ -8,7 +8,6 @@ loss:
   loss_type: stablemax_cross_entropy
 
 loops: 8
-inner_loops: 1
 num_layers: 2
 hidden_size: 64
 num_heads: 4
@@ -25,9 +24,7 @@ min_steps: 8
 refinement: ebt
 stopping: energy
 ranking: energy
-mcmc_steps: 8
 mcmc_step_size: 0.01
-mcmc_training: true
 
 ema: True
 ema_rate: 0.999

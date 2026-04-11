@@ -1,0 +1,31 @@
+# R1h re-run: depth=1, h=128, exp=4, inner_loops=1
+# Testing whether depth=1 with full MLP capacity shows multi-step convergence
+
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+
+loops: 8
+inner_loops: 1
+num_layers: 1
+hidden_size: 128
+num_heads: 4
+expansion: 4
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+# Energy stopping
+energy_threshold: 0.005
+min_steps: 8
+
+# Operational mode
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+mcmc_steps: 0
+mcmc_training: false
+
+ema: True
+ema_rate: 0.999

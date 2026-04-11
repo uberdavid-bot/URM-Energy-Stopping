@@ -139,11 +139,11 @@ class TestPerStepLogits:
 
         assert "per_step_logits" not in outputs
 
-    def test_per_step_logits_accuracy_metrics(self):
-        """EnergyLossHead should produce per-step accuracy metrics at eval."""
+    def test_per_step_metrics_not_in_loss_head(self):
+        """Per-step metrics are computed in the outer eval loop, not EnergyLossHead."""
         from models.losses import EnergyLossHead
 
-        config = make_config(loops=4, inner_loops=4)
+        config = make_config(loops=4, inner_loops=1)
         model = ARCModel(config).to(DEVICE).eval()
         loss_head = EnergyLossHead(model, "stablemax_cross_entropy").to(DEVICE)
 
@@ -156,9 +156,9 @@ class TestPerStepLogits:
                 return_keys=[], carry=carry, batch=batch
             )
 
-        for step in range(1, config["loops"] + 1):
-            key = f"step_{step}_exact_accuracy"
-            assert key in metrics, f"Missing metric {key}"
+        # Per-step metrics should NOT be in loss_head output (they come from pretrain.py outer loop)
+        step_keys = [k for k in metrics if k.startswith("step_")]
+        assert len(step_keys) == 0, f"Unexpected per-step metrics in loss_head: {step_keys}"
 
 
 class TestEnergyHalting:

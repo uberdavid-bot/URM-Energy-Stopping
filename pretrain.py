@@ -596,14 +596,35 @@ def evaluate(
             with torch.device("cuda"):
                 carry = train_state.model.initial_carry(batch)  # type: ignore
 
-            # Forward
+            # Forward with per-outer-step tracking
             inference_steps = 0
             max_inference_steps = 100  # Safety cap
+            labels = batch["labels"]
+            mask = labels != -100  # IGNORE_LABEL_ID
+            loss_counts = mask.sum(-1)
+            valid = loss_counts > 0
+            prev_hidden = None
+            per_step_metrics = {}
+            step_return_keys = return_keys | {"logits"}
+
             while True:
                 carry, loss, metrics, preds, all_finish = train_state.model(
-                    carry=carry, batch=batch, return_keys=return_keys
+                    carry=carry, batch=batch, return_keys=step_return_keys
                 )
                 inference_steps += 1
+
+                # Per-step exact accuracy (all puzzles, not just newly halted)
+                step_preds = torch.argmax(preds["logits"], dim=-1)
+                step_correct = mask & (step_preds == labels)
+                step_seq_correct = step_correct.sum(-1) == loss_counts
+                per_step_metrics[f"step_{inference_steps}_exact_accuracy"] = (valid & step_seq_correct).sum()
+
+                # Per-step delta norm
+                cur_hidden = carry.current_hidden
+                if prev_hidden is not None:
+                    delta = (cur_hidden - prev_hidden).norm(dim=-1).mean()
+                    per_step_metrics[f"step_{inference_steps}_delta_norm"] = delta
+                prev_hidden = cur_hidden.detach().clone()
 
                 if all_finish or inference_steps >= max_inference_steps:
                     break
@@ -621,6 +642,9 @@ def evaluate(
                 evaluator.update_batch(batch, preds)
 
             del carry, loss, preds, batch, all_finish
+
+            # Inject per-outer-step metrics
+            metrics.update(per_step_metrics)
 
             # Aggregate metrics
             set_id = set_ids[set_name]

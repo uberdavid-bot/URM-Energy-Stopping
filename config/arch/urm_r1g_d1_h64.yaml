@@ -1,0 +1,32 @@
+# Experiment R1g: depth=1, h=64, exp=2 — small model with corrected MLP rounding
+# depth=1, hidden=64, 4 heads, expansion=2, 8 recurrence steps, 10x10 grids
+# MLP inter=88 (with granularity=8), not 256 (old granularity=256)
+# Testing whether small enough capacity forces multi-step convergence
+
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+
+loops: 8
+num_layers: 1
+hidden_size: 64
+num_heads: 4
+expansion: 2
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+# Energy stopping
+energy_threshold: 0.005
+min_steps: 8
+
+# Operational mode
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+mcmc_steps: 0
+mcmc_training: false
+
+ema: True
+ema_rate: 0.999

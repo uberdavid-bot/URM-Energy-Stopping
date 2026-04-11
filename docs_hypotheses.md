@@ -215,6 +215,35 @@ Expected outcome: Per-step accuracy should show meaningful improvement across st
 Reference: R1e (depth=2, h=128, exp=2) killed — confirmed one-step convergence persists at depth=2 regardless of MLP size.
 
 ### Result
+**Killed at ~37.5K/80K steps (47%). Per-step convergence flat throughout.** Wandb: `R1f-d1-h128-exp2-260410` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/rs5u8pma))
+
+7 eval checkpoints (5.3K–37.5K steps). Per-step variation 0.3–0.9% — flat, same pattern as depth=2.
+
+| Step | Tok% | Exact% | P@1 | P@10 | S1→S8 variation |
+|------|------|--------|-----|------|-----------------|
+| 5.3K | 55.8% | 0.2% | 0.0% | 2.6% | 0.5% |
+| 16.1K | 66.9% | 1.3% | 2.6% | 10.4% | 0.7% |
+| 26.8K | 73.5% | 3.1% | 5.2% | 19.5% | 0.9% |
+| 37.5K | 76.7% | 5.1% | 13.0% | 24.7% | 0.3% |
+
+At 37.5K steps: 76.7% token acc, 13.0% pass@1 — weaker than depth=2/exp=2 (83.8% / 23.4% at 53.5K) as expected from fewer params, but per-step curve is still flat. Depth=1 with h=128/exp=2 (~164K params) still one-step converges.
+
+**Conclusion:** depth=1 alone is not sufficient to break one-step convergence at h=128. The representation width (128-dim hidden states) provides enough capacity for a single attention+MLP block to extract the answer. Need to reduce h as well.
+
+---
+
+### Experiment R1g — depth=1, h=64, exp=2, corrected rounding
+Date: 2026-04-10
+Script: `scripts/train_r1g_d1_h64.sh`
+Config: depth=1, h=64, 4 heads, expansion=2, 8 steps, batch 512, 10×10 grids, 80K steps (31590 epochs), constant LR (3e-4) after 100-step warmup, EMA 0.999. MLP rounding granularity reduced from 256 to 8 — at h=64/exp=2, inter=_find_multiple(85, 8)=88 instead of 256. eval_interval=2106 epochs (15 checkpoints).
+
+Hypothesis: All depth=2 and depth=1/h=128 configs one-step converge. Reducing to h=64 with corrected MLP rounding (inter=88 instead of 256) gives a much smaller model that should need multiple recurrence steps. Previous h=64 results were invalid due to (a) undertrained from LR decay and (b) inflated MLP from 256 rounding.
+
+Expected outcome: Per-step accuracy should show meaningful improvement across steps. If it still one-steps, may need to go even smaller (h=32) or consider that the one-step convergence is fundamental to the architecture's input re-injection mechanism.
+
+Reference: R1f (depth=1, h=128, exp=2) killed — still one-step convergence.
+
+### Result
 TBD
 
 ---

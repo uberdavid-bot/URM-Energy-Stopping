@@ -140,7 +140,7 @@ class SwiGLU(nn.Module):
     def __init__(self, hidden_size: int, expansion: float, mlp_dropout: float = 0.0):
         super().__init__()
         
-        inter = _find_multiple(round(expansion * hidden_size * 2 / 3), 256)
+        inter = _find_multiple(round(expansion * hidden_size * 2 / 3), 8)
         self.gate_up_proj = CastedLinear(hidden_size, inter * 2, bias=False)
         self.down_proj    = CastedLinear(inter, hidden_size, bias=False)
         self.mlp_dropout = nn.Dropout(mlp_dropout)
@@ -160,7 +160,7 @@ class ConvSwiGLU(nn.Module):
     ):
         super().__init__()
 
-        inter = intermediate_size if intermediate_size is not None else _find_multiple(round(expansion * hidden_size * 2 / 3), 256)
+        inter = intermediate_size if intermediate_size is not None else _find_multiple(round(expansion * hidden_size * 2 / 3), 8)
         self.inter = inter
         self.gate_up_proj = CastedLinear(hidden_size, inter * 2, bias=False)
         self.dwconv = nn.Conv1d(
@@ -202,7 +202,7 @@ class FullyLinearGLU(nn.Module):
 class LinearGLU(nn.Module):
     def __init__(self, hidden_size: int, expansion: float):
         super().__init__()
-        inter = _find_multiple(round(expansion * hidden_size * 2 / 3), 256)
+        inter = _find_multiple(round(expansion * hidden_size * 2 / 3), 8)
 
         self.gate_up_proj = CastedLinear(hidden_size, inter * 2, bias=False)
         self.down_proj = CastedLinear(inter, hidden_size, bias=False)
@@ -215,7 +215,7 @@ class LinearGLU(nn.Module):
 class SiLU(nn.Module):
     def __init__(self, hidden_size: int, expansion: float):
         super().__init__()
-        inter = _find_multiple(round(expansion * hidden_size), 256)
+        inter = _find_multiple(round(expansion * hidden_size), 8)
 
         self.up_proj = CastedLinear(hidden_size, inter, bias=False)
         self.down_proj = CastedLinear(inter, hidden_size, bias=False)
@@ -243,7 +243,7 @@ class LinearSwish(nn.Module):
 class ReLU(nn.Module):
     def __init__(self, hidden_size: int, expansion: float):
         super().__init__()
-        inter = _find_multiple(round(expansion * hidden_size), 256)
+        inter = _find_multiple(round(expansion * hidden_size), 8)
 
         self.up_proj = CastedLinear(hidden_size, inter, bias=False)
         self.down_proj = CastedLinear(inter, hidden_size, bias=False)

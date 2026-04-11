@@ -310,42 +310,54 @@ Stopping metrics: qhalt_stop_step=7.5 (2.6% acc), energy_stop_step=6.3 (3.2% acc
 
 ---
 
-### Experiment R2 — Hidden-space MCMC (fix the implementation)
+### Experiment R2 — Energy verifier via trajectory ranking (first-order)
 Date: TBD
-Config: Same backbone as R1. Add energy head. MCMC in hidden space, no detach between steps during training, create_graph=True, dual reconstruction loss, N MCMC steps.
-Hypothesis: With MCMC correctly implemented in hidden space (not soft-embedding space) and with gradient flow across steps (not detached), the energy head will learn to produce useful gradients that improve predictions.
-Expected outcome: mcmc_improvement > 0 (refined predictions better than unrefined). Energy gap maintained (no collapse). VRAM should be well within 24GB budget at hidden=64.
-Inspired by: EBT paper's optimization-based training (Algorithm 1). Fixes two critical bugs from Exp 3b.
-Risk: Second-order gradients through multiple non-detached MCMC steps may cause training instability. Energy landscape may still not be useful for discrete reasoning.
+Config: Same backbone as R1h (d=1, h=64, exp=2, 8 steps). Co-train energy head alongside URM using trajectory ranking loss. First-order only — no MCMC, no create_graph=True. All-pairs weighted margin loss across URM trajectory steps: quality_gap * F.relu(E(better) - E(worse) + margin). Separate gradient clipping: energy head max_norm=1.0, backbone max_norm=5.0.
+Hypothesis: The energy head, trained via trajectory ranking on URM hidden states, learns to assign lower energy to better hidden states (higher reconstruction accuracy). This produces a verifier that outperforms Q-halt for pass@K reranking — without requiring any MCMC or second-order gradients.
+Expected outcome: Energy-accuracy Spearman correlation > 0.5 throughout training. Active ranking pairs stay > 30% of 28 total. Energy reranking improves pass@K over Q-halt at some K values.
+Key diagnostics to log:
+- `trajectory_quality_first`, `trajectory_quality_last`, `active_pairs` (from step 0)
+- Energy-accuracy Spearman correlation per eval
+- Cosine similarity between ∇_hidden E and direction toward best trajectory hidden state (R3 readiness signal — does energy gradient point toward better states?)
+Inspired by: Exp 4 (trajectory supervision worked when quality spread existed), EBT paper Section 2.1 (verification easier than generation).
+Risk: Shared backbone means trajectory ranking gradients modify URM weights — monitor for URM regression. Quality spread on training data may collapse faster than on eval data due to train/eval gap (20.7% vs 3.76% exact in R1h).
 
 ### Result
 TBD
 
 ---
 
-### Experiment R3 — Core comparison: URM vs EBT
+### Experiment R2.5 — Energy reranking + stopping (eval only)
 Date: TBD
-Config: Two models sharing the same backbone from R1:
-- **URM model**: N recurrence steps (transformer + input re-injection), Q-halt stopping, Q-halt pass@K ranking.
-- **EBT model**: N MCMC steps in hidden space starting from input_embeddings (no URM steps), energy convergence stopping, energy pass@K ranking.
-Both trained for 10K steps with matched compute budgets.
-Hypothesis: Pure EBT (explicit energy minimization) will underperform URM (implicit recurrence) on ARC reasoning because attention-based processing provides inductive biases (spatial relationships, pattern matching) that scalar energy gradients cannot replicate. However, energy-based pass@K reranking may outperform Q-halt reranking even if per-prediction accuracy is lower.
-Expected outcome: URM accuracy > EBT accuracy at matched steps. Energy pass@K ranking may beat Q-halt ranking. Energy convergence may correlate better with prediction correctness than Q-halt confidence.
-Inspired by: EBT paper Section 2.1 — verification generalizes better than generation. Even if EBT generates worse predictions, its energy function may be a better verifier.
-Risk: Pure EBT may fail catastrophically on ARC (0% accuracy), making comparison meaningless. In that case, proceed to R4.
+Config: No new training. Use R2-trained checkpoint. Score URM pass@K candidates by energy. Compare to Q-halt ranking and stopping.
+Hypothesis: Learned energy function is a better confidence signal than Q-halt for selecting among multiple URM predictions.
+Expected outcome: Energy reranking improves pass@K over Q-halt on at least some K values. Energy convergence stopping selects a step closer to peak accuracy than Q-halt stopping.
+Success criterion: This is the first publishable result if it works — "learned energy verification beats learned halting for iterative reasoning."
+Gate for R3: If energy reranking shows no improvement AND cosine similarity diagnostic from R2 is low (energy gradients don't point toward better states), skip R3 (MCMC won't help either). If reranking works but cosine similarity is low, energy is a good verifier but not a good landscape — R3 may still fail.
 
 ### Result
 TBD
 
 ---
 
-### Experiment R4 — Hybrid: URM initialization + MCMC refinement (contingent on R3)
+### Experiment R3 — MCMC refinement: hybrid URM + MCMC (conditional on R2.5)
 Date: TBD
-Config: M URM steps + (N-M) MCMC steps, where M+total_MCMC = N (matched compute with R3). Try M=2 as starting point.
-Hypothesis: URM provides a good initialization via attention-based processing, then MCMC refinement in hidden space provides complementary explicit optimization that improves predictions beyond what additional URM steps would achieve.
-Expected outcome: Hybrid accuracy > pure URM accuracy at matched total steps. The URM trajectory (steps 1→M) provides natural training signal for the energy landscape via trajectory supervision.
-Inspired by: All prior experiments showed MCMC adds nothing on top of *fully converged* URM. With M=2, URM is far from converged, giving MCMC genuine room to contribute.
-Risk: MCMC refinement may just be a worse version of additional URM steps — same hidden space, similar update direction, but without attention's inductive bias.
+Config: M URM steps + K MCMC steps at matched total compute (M+K = N). Start with M = N-2 (most URM, little MCMC) and decrease M. Second-order gradients via create_graph=True. EBT-style regularization: Langevin noise during training (drop at inference), step size annealing, randomized step count. Dual reconstruction loss (unrefined + refined) — non-negotiable per Exp 3a.
+Hypothesis: MCMC refinement in hidden space, guided by the energy landscape trained in R2, provides complementary optimization that improves predictions beyond what additional URM steps achieve. The energy landscape, now trained through both trajectory ranking (R2) and MCMC optimization (R3), develops smooth gradient structure.
+Expected outcome: mcmc_improvement > 0. Hybrid accuracy > pure URM accuracy at matched total steps.
+Inspired by: EBT paper Section 3.3 (energy landscape regularization), IREM (initialization matters for energy minimization). All prior experiments showed MCMC fails on fully-converged URM; M < N ensures URM is not converged when MCMC starts.
+Risk: Second-order gradients may cause training instability. MCMC may be a worse version of additional URM steps — same hidden space but without attention's inductive bias.
+
+### Result
+TBD
+
+---
+
+### Experiment R3b — Pure EBT ablation (optional, contingent on R3)
+Date: TBD
+Config: All MCMC steps, no URM. Use 1 URM step as initialization (counted in budget) since cold start from input_embeddings unlikely to work on discrete ARC grids.
+Hypothesis: Pure energy minimization alone cannot solve ARC — attention-based processing provides essential inductive biases for spatial pattern recognition.
+Expected outcome: Pure EBT << URM accuracy. This is an ablation for the paper, not a primary experiment.
 
 ### Result
 TBD
@@ -354,7 +366,7 @@ TBD
 
 ## Lessons Carried Forward
 1. **Dual reconstruction loss is mandatory** for MCMC training (Exp 3a).
-2. **Contrastive loss alone causes energy collapse** (Exp 1). Use reconstruction-through-MCMC as primary energy training signal.
+2. **Contrastive loss alone causes energy collapse** (Exp 1). Use trajectory ranking as primary energy training signal (first-order, R2). MCMC reconstruction provides second-order signal in R3.
 3. **Right-size the model for the problem.** The model must struggle enough that refinement has room to help.
 4. **MCMC must operate in hidden space**, not soft-embedding space.
 5. **Don't detach between MCMC steps during training.** Energy head needs multi-step trajectory gradients.

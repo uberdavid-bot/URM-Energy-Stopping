@@ -69,7 +69,7 @@ class TestForwardTrajectory:
 
         for t in range(4):
             assert all_logits[t].shape == (B, S, V)
-            assert all_q_logits[t].shape == (B, 2)
+            assert all_q_logits[t].shape == (B,)
             assert all_hidden[t].shape == (B, S + P, H)
 
         assert input_emb.shape == (B, S + P, H)

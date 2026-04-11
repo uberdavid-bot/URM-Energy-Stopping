@@ -83,7 +83,7 @@ class ARCBackbone(nn.Module):
             cast_to=self.forward_dtype,
         )
         self.lm_head = CastedLinear(self.config.hidden_size, self.config.vocab_size, bias=False)
-        self.q_head = CastedLinear(self.config.hidden_size, 2, bias=True)
+        self.q_head = CastedLinear(self.config.hidden_size, 1, bias=True)
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)
 
         if self.config.puzzle_emb_ndim > 0:
@@ -228,7 +228,7 @@ class ARCModel(nn.Module):
                 )
 
             logits = self.inner.lm_head(hidden)[:, P:]
-            q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32)
+            q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32).squeeze(-1)
             all_logits.append(logits)
             all_q_logits.append(q_logits)
             all_hidden.append(hidden)

@@ -112,7 +112,10 @@ Active configs: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, plu
 Per-step metrics are computed inside `EnergyLossHead` for both train and eval: `step_k_accuracy`, `step_k_exact_accuracy`, `step_k_delta_norm`. Eval mode additionally computes stopping metrics: `qhalt_stop_step`, `qhalt_stop_accuracy`, `energy_stop_step`, `energy_stop_accuracy`.
 
 ### Right-size the model for the problem
-The model must need most of its step budget to converge. Prior R1 experiments showed flat per-step curves because hidden states were detached between steps. With deep supervision and undetached gradient flow, multi-step convergence should emerge.
+Validated config: depth=1, h=64, expansion=2, 8 steps, 10×10 grids, ~35K params. R1h confirmed monotonic per-step accuracy ramp (0.13% → 3.76% exact accuracy step 1→6). Prior R1 experiments showed flat per-step curves because hidden states were detached between steps; deep supervision + cross-step gradient flow fixed this.
+
+### Energy head is untrained in URM mode
+In URM refinement mode, `compute_joint_energy` is only called inside `torch.no_grad()` blocks (for eval metrics). The energy head receives zero training gradient. The `energy_stop_step` and `energy_stop_accuracy` eval metrics currently measure backbone hidden state convergence (since the energy head reuses backbone transformer layers), not learned energy structure. Training the energy head requires either: (a) trajectory ranking loss (Phase 2, first-order), or (b) EBT/hybrid mode where `_mcmc_step` calls `compute_joint_energy` with `create_graph=True`.
 
 ## Setup
 

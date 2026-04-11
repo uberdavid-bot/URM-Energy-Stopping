@@ -44,6 +44,7 @@ After N steps: logits = lm_head(hidden) → predictions
   - Linear(hidden_dim, 1) → scalar energy per example
 - Lower energy = better prediction
 - RoPE sized for 2 × seq_len + puzzle_emb_len
+- **Currently untrained in URM mode.** `compute_joint_energy` is only called inside `no_grad` blocks for eval metrics. The energy head receives zero gradient. The eval `energy_stop_step` metric measures backbone hidden state convergence (since the energy function reuses backbone layers), not learned energy structure. Training the energy head is the subject of Phase 2 (trajectory ranking loss).
 - **Optional upgrade**: position-aware energy head (per-position energy contributions summed rather than pool-then-project). Try if energy-accuracy correlation is weak in R2.
 
 ## Refinement Modes

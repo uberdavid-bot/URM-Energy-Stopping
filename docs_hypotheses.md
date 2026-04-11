@@ -282,7 +282,31 @@ Expected outcome: Per-step accuracy should show clear monotonic improvement from
 Reference: R1g (same config, old carry-based code) — pending. TRM paper (Jolicoeur-Martineau, 2025) found deep supervision to be the single largest contributor to recurrence benefit, doubling accuracy.
 
 ### Result
-TBD
+**Deep supervision works — monotonic per-step accuracy ramp confirmed. Phase 1 complete.** 35,275 params. Wandb: `R1h-deepsup-d1-h64-260411` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/tyn03n4l))
+
+**Eval per-step accuracy (final checkpoint, 80K steps):**
+
+| Step | Token Acc | Exact Acc | Delta Norm |
+|------|-----------|-----------|------------|
+| 1 | 66.8% | 0.13% | — |
+| 2 | 74.7% | 0.38% | 0.0080 |
+| 3 | 77.3% | 1.43% | 0.0042 |
+| 4 | 78.4% | 3.04% | 0.0027 |
+| 5 | 78.8% | 3.61% | 0.0018 |
+| 6 | **78.9%** | **3.76%** | 0.0014 |
+| 7 | 78.9% | 3.61% | 0.0011 |
+| 8 | 78.7% | 3.16% | 0.0009 |
+
+**12.1% token accuracy gain step 1→6. 29× exact accuracy improvement (0.13% → 3.76% peak at step 6).** Monotonically increasing through step 6, slight decline at 7–8. Prior R1 experiments had <2% step variation.
+
+Train per-step exact accuracy (final batch): 3.9% → 8.6% → 12.3% → 17.2% → 19.9% → 19.5% → 20.7% → 19.1%. Train overfits significantly vs eval (20.7% vs 3.76% peak exact).
+
+pass@K (Q-halt): 5.2% @1, 5.8% @2, 10.4% @5, 15.6% @10, 22.7% @100, 24.0% @1000.
+pass@K (energy): 0% @1, 0% @10, 1.9% @100, 14.3% @1000. Energy ranking far worse — energy head is untrained in URM mode.
+
+Stopping metrics: qhalt_stop_step=7.5 (2.6% acc), energy_stop_step=6.3 (3.2% acc). Energy stopping is measuring hidden state convergence (via shared backbone layers), not learned energy structure.
+
+**Conclusion:** Deep supervision + cross-step gradient flow is the fix for flat per-step curves. The model learns to distribute computation across 8 steps, with clear monotonic improvement from step 1 through step 6. The slight decline at steps 7–8 suggests the model may benefit from fewer steps or that the linear weight ramp over-weights late steps where overfitting occurs. The train/eval gap (20.7% vs 3.76% exact) indicates significant overfitting at this model size — a capacity increase or regularization may help generalization. Phase 1 is complete: we have a validated architecture and training setup where multi-step convergence emerges, enabling Phase 2 (energy training via trajectory supervision).
 
 ---
 

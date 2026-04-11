@@ -82,7 +82,7 @@ class EnergyLossHead(nn.Module):
                 step_correct = (mask & (step_preds == labels)).sum(-1) == loss_counts
 
             qhalt_loss = F.binary_cross_entropy_with_logits(
-                all_q_logits[t][..., 0],
+                all_q_logits[t],
                 step_correct.to(all_q_logits[t].dtype),
                 reduction="sum",
             )
@@ -110,7 +110,7 @@ class EnergyLossHead(nn.Module):
             }
 
             # Q-halt accuracy at final step
-            final_q_pred = all_q_logits[-1][..., 0] >= 0
+            final_q_pred = all_q_logits[-1] >= 0
             metrics["q_halt_accuracy"] = (valid & (final_q_pred == final_seq_correct)).sum()
 
             # Energy at final step
@@ -138,7 +138,7 @@ class EnergyLossHead(nn.Module):
             if not self.training:
                 # Q-halt stopping: first step where q_logits >= 0
                 # shape: [B, N]
-                q_preds = torch.stack([q[..., 0] for q in all_q_logits], dim=1)  # [B, N]
+                q_preds = torch.stack(all_q_logits, dim=1)  # [B, N]
                 q_halt_mask = q_preds >= 0  # [B, N]
 
                 # Per-sample exact accuracy at each step: [B, N]
@@ -199,7 +199,7 @@ class EnergyLossHead(nn.Module):
         final_outputs = {
             "logits": final_logits.detach(),
             "preds": final_preds.detach(),
-            "q_halt_logits": all_q_logits[-1][..., 0].detach(),
+            "q_halt_logits": all_q_logits[-1].detach(),
             "current_energy": final_energy.detach(),
         }
         for k in return_keys:

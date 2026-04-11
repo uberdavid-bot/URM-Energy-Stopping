@@ -157,7 +157,7 @@ class TestPerStepLogits:
             )
 
         for step in range(1, config["loops"] + 1):
-            key = f"step_{step}_accuracy"
+            key = f"step_{step}_exact_accuracy"
             assert key in metrics, f"Missing metric {key}"
 
 

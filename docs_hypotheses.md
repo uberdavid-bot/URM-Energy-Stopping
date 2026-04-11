@@ -184,6 +184,37 @@ Expected outcome: Three possible outcomes: (1) multi-step convergence emerges mi
 Reference: R1c (exp=2, 10K cosine) was undertrained. R1-full (exp=4, 80K) proved full training is needed for ground truth.
 
 ### Result
+**Killed at ~54K/80K steps (67%). Per-step convergence flat throughout.** Wandb: `R1e-exp2-full-h128-260410` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/d1fnymz8))
+
+10 eval checkpoints (5.3K–53.5K steps). Per-step variation 0.1–0.5% at every checkpoint — completely flat from the first eval onward. The model always peaks at step 1 or 2, with negligible change through step 8.
+
+| Step | Tok% | Exact% | P@1 | P@10 | S1→S8 variation |
+|------|------|--------|-----|------|-----------------|
+| 5.3K | 57.8% | 0.2% | 0.0% | 6.5% | 0.4% |
+| 10.7K | 65.0% | 1.7% | 3.2% | 20.8% | 0.1% |
+| 21.4K | 74.1% | 6.8% | 11.7% | 31.8% | 0.4% |
+| 32.1K | 78.8% | 11.3% | 15.6% | 37.7% | 0.4% |
+| 42.8K | 81.9% | 14.8% | 19.5% | 44.2% | 0.3% |
+| 53.5K | 83.8% | 16.8% | 23.4% | 46.8% | 0.3% |
+
+At 53.5K steps: 83.8% token acc, 23.4% pass@1 — still climbing (vs R1-full 85.9% / 25.3% at 80K), but the per-step curve is flat at every training stage. No multi-step convergence emerged at any point during training. Constant LR (vs R1-full's cosine decay to 0.1×) made no difference to the convergence pattern.
+
+**Conclusion:** Reducing MLP capacity (expansion=2) does not create multi-step convergence at depth=2. The flat per-step curve is a property of having two transformer layers per recurrence step, not the MLP width. Each depth=2 step provides enough nonlinear processing to reach the fixed point in a single pass.
+
+---
+
+### Experiment R1f — depth=1, h=128, expansion=2
+Date: 2026-04-10
+Script: `scripts/train_r1f_d1.sh`
+Config: depth=1, h=128, 4 heads, expansion=2, 8 steps, batch 512, 10×10 grids, 80K steps (31590 epochs), constant LR (3e-4) after 100-step warmup, EMA 0.999. ~164K transformer params (vs 330K at depth=2, 530K at baseline). eval_interval=2106 epochs (15 checkpoints).
+
+Hypothesis: Every depth=2 configuration tested (h=128/exp=4, h=128/exp=2, h=96/exp=4, h=64/exp=4) converges in a single recurrence step regardless of MLP capacity. The two-layer transformer performs too much nonlinear processing per step for the 10×10 problem. Reducing to depth=1 halves the processing per step — each recurrence pass is now a single attention + MLP block. This should force the model to distribute computation across multiple recurrence steps. At h=128 exp=2 this gives ~164K transformer params (vs 530K baseline).
+
+Expected outcome: Per-step accuracy should show meaningful improvement across steps, not one-step convergence. If it still one-steps, next candidate is depth=1, h=64, exp=2 (~66K params).
+
+Reference: R1e (depth=2, h=128, exp=2) killed — confirmed one-step convergence persists at depth=2 regardless of MLP size.
+
+### Result
 TBD
 
 ---

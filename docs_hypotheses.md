@@ -268,6 +268,24 @@ TBD
 
 ---
 
+### Experiment R1h — depth=1, h=64, exp=2, deep supervision (first run with cross-step gradient flow)
+Date: 2026-04-11
+Script: `scripts/train_r1h_deep_sup.sh`
+Config: `config/arch/urm_r1g_d1_h64.yaml` — depth=1, h=64, 4 heads (head_dim=16), expansion=2, 8 recurrence steps, batch 512, 10×10 grids, 80K steps (31590 epochs), constant LR (3e-4) after 100-step warmup, EMA 0.999. MLP inter=88 (granularity=8). ~35K transformer params. eval_interval=2106 epochs (15 checkpoints). stablemax_cross_entropy, bfloat16.
+
+**This is the first run with deep supervision + cross-step gradient flow.** All prior R1 experiments (R1a–R1g) used the old carry-based outer loop that detached hidden states between steps — each step was independently trained as a single-pass model with shared weights. R1h uses `forward_trajectory()` which runs all 8 steps in a single call with NO `.detach()` between steps. Deep supervision applies weighted reconstruction loss at every step (linear ramp `(t+1)/N`) plus Q-halt BCE at every step.
+
+Hypothesis: Deep supervision provides a per-step learning signal and cross-step gradient flow enables the model to learn to distribute computation across steps. Unlike the old detached training where each step had identical behavior (producing flat per-step curves), gradients from later steps now flow into earlier steps, creating a direct learning signal for "produce intermediate representations that later steps can improve." We expect to see a monotonic accuracy ramp from step 1 to step 8, unlike all prior R1 experiments which showed 0.3–3.8% variation (flat).
+
+Expected outcome: Per-step accuracy should show clear monotonic improvement from step 1 to step 8. The step-8 accuracy should exceed what R1g achieves (TBD — R1g not yet run with old code). If the ramp emerges, this validates that the flat curves were caused by detached gradients, not architectural limitations, and opens the path to R2/R3 refinement comparisons.
+
+Reference: R1g (same config, old carry-based code) — pending. TRM paper (Jolicoeur-Martineau, 2025) found deep supervision to be the single largest contributor to recurrence benefit, doubling accuracy.
+
+### Result
+TBD
+
+---
+
 ### Experiment R2 — Hidden-space MCMC (fix the implementation)
 Date: TBD
 Config: Same backbone as R1. Add energy head. MCMC in hidden space, no detach between steps during training, create_graph=True, dual reconstruction loss, N MCMC steps.

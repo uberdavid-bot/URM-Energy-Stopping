@@ -3,7 +3,6 @@ from dataclasses import dataclass
 import os
 import math
 import yaml
-import shutil
 import re
 import copy
 from pathlib import Path
@@ -136,7 +135,6 @@ class TrainState:
     model: nn.Module
     optimizers: Sequence[torch.optim.Optimizer]
     optimizer_lrs: Sequence[float]
-    carry: Any
 
     step: int
     total_steps: int
@@ -247,7 +245,6 @@ def init_train_state(
         model=model,
         optimizers=optimizers,
         optimizer_lrs=optimizer_lrs,
-        carry=None,
     )
 
     load_checkpoint(train_state, config, rank)
@@ -415,9 +412,6 @@ def load_checkpoint(train_state: TrainState, config: PretrainConfig, rank: int):
     if step is not None:
         train_state.step = int(step)
 
-    # Reset carry since we do not serialize it
-    train_state.carry = None
-
     if rng_state is not None:
         normalized_rng_state = _prepare_rng_state(rng_state, device="cpu")
         # Older checkpoints should always store a single tensor here.
@@ -483,15 +477,9 @@ def train_batch(
     # To device
     batch = {k: v.cuda() for k, v in batch.items()}
 
-    # Init carry if it is None
-    if train_state.carry is None:
-        with torch.device("cuda"):
-            train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
-
-    # Forward
-    compute_target_q = train_state.step % config.target_q_update_every == 0
-    train_state.carry, loss, metrics, _, _ = train_state.model(
-        carry=train_state.carry, batch=batch, return_keys=[], compute_target_q=compute_target_q
+    # Forward — loss head runs full trajectory internally
+    _, loss, metrics, _, _ = train_state.model(
+        batch=batch, return_keys=[]
     )
 
     loss_scale = 1.0 / (global_batch_size * accum_steps)
@@ -583,68 +571,34 @@ def evaluate(
         metric_keys = []
         metric_values = None
 
-        carry = None
         processed_batches = 0
-        
+
         for set_name, batch, global_batch_size in eval_loader:
             processed_batches += 1
             if rank == 0:
                 print(f"Processing batch {processed_batches}: {set_name}")
-            
+
             # To device
             batch = {k: v.cuda() for k, v in batch.items()}
-            with torch.device("cuda"):
-                carry = train_state.model.initial_carry(batch)  # type: ignore
 
-            # Forward with per-outer-step tracking
-            inference_steps = 0
-            max_inference_steps = 100  # Safety cap
-            labels = batch["labels"]
-            mask = labels != -100  # IGNORE_LABEL_ID
-            loss_counts = mask.sum(-1)
-            valid = loss_counts > 0
-            prev_hidden = None
-            per_step_metrics = {}
-            step_return_keys = return_keys | {"logits"}
-
-            while True:
-                carry, loss, metrics, preds, all_finish = train_state.model(
-                    carry=carry, batch=batch, return_keys=step_return_keys
-                )
-                inference_steps += 1
-
-                # Per-step exact accuracy (all puzzles, not just newly halted)
-                step_preds = torch.argmax(preds["logits"], dim=-1)
-                step_correct = mask & (step_preds == labels)
-                step_seq_correct = step_correct.sum(-1) == loss_counts
-                per_step_metrics[f"step_{inference_steps}_exact_accuracy"] = (valid & step_seq_correct).sum()
-
-                # Per-step delta norm
-                cur_hidden = carry.current_hidden
-                if prev_hidden is not None:
-                    delta = (cur_hidden - prev_hidden).norm(dim=-1).mean()
-                    per_step_metrics[f"step_{inference_steps}_delta_norm"] = delta
-                prev_hidden = cur_hidden.detach().clone()
-
-                if all_finish or inference_steps >= max_inference_steps:
-                    break
+            # Single call — loss head runs full trajectory and computes all metrics
+            _, loss, metrics, preds, _ = train_state.model(
+                batch=batch, return_keys=return_keys
+            )
 
             if rank == 0:
-                print(f"  Completed inference in {inference_steps} steps")
+                print(f"  Completed inference")
 
             for collection in (batch, preds):
                 for k, v in collection.items():
                     if k in config.eval_save_outputs:
                         save_preds.setdefault(k, [])
-                        save_preds[k].append(v.cpu())  # Move to CPU for saving GPU memory
+                        save_preds[k].append(v.cpu())
 
             for evaluator in evaluators:
                 evaluator.update_batch(batch, preds)
 
-            del carry, loss, preds, batch, all_finish
-
-            # Inject per-outer-step metrics
-            metrics.update(per_step_metrics)
+            del loss, preds, batch
 
             # Aggregate metrics
             set_id = set_ids[set_name]

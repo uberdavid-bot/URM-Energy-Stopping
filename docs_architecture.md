@@ -48,43 +48,44 @@ After N steps: logits = lm_head(hidden) → predictions
 
 ## Refinement Modes
 
-All modes do **one step per `forward()` call**. The outer loop (pretrain.py) handles iteration and halting identically for all modes.
+All modes use `forward_trajectory(batch, N)` which runs N recurrence steps in a single call with **full gradient flow** (no detach between steps). Training uses deep supervision: every step gets a weighted reconstruction loss.
 
 ### URM Mode (`refinement="urm"`)
 ```python
-# One step per forward() call:
-hidden = hidden + input_embeddings        # re-inject input
-hidden = transformer_layers(hidden)       # shared weights
-logits = lm_head(hidden)
-energy = compute_joint_energy(input_embeddings, hidden)
+# forward_trajectory runs N steps:
+for step in range(N):
+    hidden = hidden + input_embeddings        # re-inject input
+    hidden = transformer_layers(hidden)       # shared weights
+    logits_t = lm_head(hidden)
+    q_logits_t = q_head(hidden[:, 0])
+# Returns: all_logits, all_q_logits, all_hidden, input_embeddings
 ```
-Implicit energy minimization: each transformer pass pushes hidden toward a fixed point. Q-halt confidence used for pass@K ranking.
+Implicit energy minimization: each transformer pass pushes hidden toward a fixed point. No detach between steps — gradients flow through the full trajectory for deep supervision.
 
 ### EBT Mode (`refinement="ebt"`)
 ```python
-# One step per forward() call:
-energy = compute_joint_energy(input_embeddings, hidden)
-grad = autograd.grad(energy.sum(), hidden, create_graph=True)[0]
-grad = grad / grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-hidden = hidden - step_size * grad
-logits = lm_head(hidden)
+# forward_trajectory runs N steps:
+for step in range(N):
+    energy = compute_joint_energy(input_embeddings, hidden)
+    grad = autograd.grad(energy.sum(), hidden, create_graph=True)[0]
+    hidden = hidden - step_size * normalized(grad)
+    logits_t = lm_head(hidden)
 ```
-Explicit energy minimization: each step follows the energy gradient in hidden space. create_graph=True during training for second-order gradient flow into the energy head. Detach between steps at inference.
+Explicit energy minimization: each step follows the energy gradient in hidden space. create_graph=True during training for second-order gradient flow into the energy head. Detach between steps at inference only.
 
 ### Hybrid Mode (`refinement="hybrid"`)
 ```python
-# One step per forward() call — mode depends on step count:
-if steps < mcmc_start_step:
-    # URM phase: transformer pass
-    hidden = hidden + input_embeddings
-    hidden = transformer_layers(hidden)
-else:
-    # MCMC phase: energy gradient step
-    grad = autograd.grad(energy.sum(), hidden, create_graph=True)[0]
-    hidden = hidden - step_size * grad
-logits = lm_head(hidden)
+# forward_trajectory runs N steps:
+for step in range(N):
+    if step < mcmc_start_step:
+        hidden = hidden + input_embeddings
+        hidden = transformer_layers(hidden)
+    else:
+        grad = autograd.grad(energy.sum(), hidden, create_graph=True)[0]
+        hidden = hidden - step_size * normalized(grad)
+    logits_t = lm_head(hidden)
 ```
-M URM steps then (N-M) MCMC steps, controlled by `mcmc_start_step`. Transitions cleanly mid-sequence.
+M URM steps then (N-M) MCMC steps, controlled by `mcmc_start_step`. Transitions cleanly mid-trajectory.
 
 Pure EBT (N MCMC steps, no URM) is supported via `refinement="ebt"`. Hybrid is the primary comparison (R3).
 
@@ -106,22 +107,41 @@ The previous implementation converted logits → softmax → embed_tokens to cre
 
 Hidden-space MCMC avoids all three issues. Gradients operate in the full hidden_dim space, and both lm_head and compute_joint_energy receive inputs from the distribution they were trained on.
 
-### Gradient flow across MCMC steps
-During training, do NOT detach hidden between MCMC steps. The energy head must learn from multi-step trajectories to shape a landscape that supports multi-step optimization. Detaching limits learning to single-step gradient quality.
+### Gradient flow across steps
+During training, `forward_trajectory()` does NOT detach hidden between steps for any mode. Gradients flow through the full N-step trajectory. For MCMC steps, `create_graph=True` enables second-order gradient flow into the energy head.
 
-During inference, detach between steps (no create_graph needed, saves memory).
+During inference (EBT/hybrid only), MCMC steps detach between iterations to save memory.
 
 ## Training
+
+### Deep Supervision
+
+Training always runs N fixed steps with deep supervision. At every step t, the loss is:
+- **Reconstruction**: `loss_fn(logits_t, labels)` weighted by `(t+1)/N` (linear ramp — later steps matter more)
+- **Q-halt**: `BCE(q_head(hidden_t), correct_t)` weighted by the same linear ramp
+
+The final loss is `lm_loss + 0.5 * qhalt_loss`, where both are normalized by weight sum.
+
+```python
+for t in range(N):
+    w = (t + 1) / N
+    total_recon += w * loss_fn(logits_t, labels)
+    total_qhalt += w * BCE(q_logits_t, correct_t)
+lm_loss = total_recon / weight_sum
+total_loss = lm_loss + 0.5 * (total_qhalt / weight_sum)
+```
+
+Stopping criteria (Q-halt convergence, energy convergence) are **eval-only** — computed post-hoc on the full trajectory, never used during training.
 
 ### Losses
 
 | Loss | What it trains | When used |
 |------|---------------|-----------|
-| Reconstruction (per-step) | URM backbone / embeddings | Every URM step |
-| Trajectory ranking | Energy head (first-order) | R2+: all-pairs ranking across URM trajectory |
-| Reconstruction (refined) | Energy head (via MCMC backprop) | R3: on logits after MCMC refinement |
+| Deep supervision (per-step reconstruction) | URM backbone / embeddings | Every step, weighted by (t+1)/N |
+| Q-halt BCE (per-step) | q_head | Every step, weighted by (t+1)/N |
+| Trajectory ranking | Energy head (first-order) | R2+: all-pairs ranking across trajectory |
 
-**Dual reconstruction loss** (0.5/0.5 weighting) is mandatory when training with MCMC (R3): loss on both pre-MCMC and post-MCMC logits. The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients.
+For MCMC modes (EBT/hybrid), the reconstruction loss at MCMC steps trains the energy head through second-order gradients (create_graph=True).
 
 ### Trajectory Ranking Loss (primary energy training signal)
 
@@ -153,10 +173,10 @@ Three explicit fields control operational mode:
 - **`ranking`**: `"qhalt"` | `"energy"` — confidence signal for pass@K reranking.
 
 Training requirements by refinement mode:
-- **"urm"**: Reconstruction + Q-halt loss. First-order only.
-- **"urm" + trajectory energy (R2, planned)**: Reconstruction + Q-halt + trajectory ranking loss. First-order only. Co-trained.
-- **"ebt"**: Reconstruction loss. Second-order gradients via create_graph=True.
-- **"hybrid" (R3, planned)**: Reconstruction + trajectory ranking. URM then MCMC (controlled by `mcmc_start_step`). Second-order gradients through MCMC phase.
+- **"urm"**: Deep supervision (reconstruction + Q-halt) at every step. First-order only.
+- **"urm" + trajectory energy (R2, planned)**: Deep supervision + trajectory ranking loss. First-order only. Co-trained.
+- **"ebt"**: Deep supervision. Second-order gradients via create_graph=True.
+- **"hybrid" (R3, planned)**: Deep supervision + trajectory ranking. URM then MCMC (controlled by `mcmc_start_step`). Second-order gradients through MCMC phase.
 
 ## Energy Reranking (R2.5 — eval only)
 
@@ -168,9 +188,9 @@ At inference, energy can be used as a post-hoc verifier without MCMC:
 
 This requires no MCMC at inference — just one forward pass through the energy head per candidate.
 
-## Recurrence Simplification
+## Architecture Simplification
 
-Single recurrence loop — every step gets gradients and can be evaluated. The legacy H_cycles/L_cycles memory optimization has been removed from the config and model. This makes "one URM step" and "one MCMC step" directly comparable units of compute.
+`forward_trajectory(batch, N)` runs the full N-step recurrence in a single call. No carry state, no per-sample halting, no outer loop. Deep supervision provides per-step learning signal through undetached gradient flow. The carry-based outer loop and ModelCarry dataclass have been removed entirely. Stopping criteria are eval-only metrics computed post-hoc on the full trajectory.
 
 ## Evaluator
 
@@ -178,8 +198,8 @@ Collects predictions across augmented puzzle versions, votes, computes pass@K. R
 
 ## File Map
 
-- `models/urm/urm_energy.py` — Unified URM: config, forward (urm/ebt/hybrid modes), energy computation, MCMC refinement
-- `models/losses.py` — Loss heads
+- `models/urm/urm_energy.py` — Unified model: config, forward_trajectory (urm/ebt/hybrid modes), energy computation, MCMC step
+- `models/losses.py` — EnergyLossHead: deep supervision, per-step metrics, eval stopping metrics
 - `models/trajectory_loss.py` — Trajectory ranking loss function
 - `evaluators/arc.py` — ARC evaluation with energy reranking
 - `pretrain.py` — Training loop

@@ -86,33 +86,33 @@ MCMC gradients are taken w.r.t. transformer hidden states directly — the outpu
 ### No detach between MCMC steps during training (FIXED)
 The energy head learns from multi-step MCMC trajectories via create_graph=True. Do not call `hidden.detach().requires_grad_(True)` inside the MCMC loop during training — this breaks the computational graph. Detach only at inference to save memory. Previous implementation was buggy; now fixed.
 
-### Dual reconstruction loss is mandatory with MCMC
-When training with MCMC refinement, compute reconstruction loss on BOTH unrefined logits (before MCMC) and refined logits (after MCMC), weighted 0.5/0.5. The unrefined loss keeps the backbone learning cleanly. The refined loss trains the energy head through second-order gradients. Refined-only loss destroys URM learning (confirmed in Exp 3a).
+### Deep supervision is mandatory
+Training uses deep supervision: every recurrence step t gets reconstruction loss weighted by `(t+1)/N` (linear ramp) plus Q-halt BCE with the same weighting. Gradients flow undetached through the full N-step trajectory. This is the primary mechanism for learning multi-step refinement — without it, each step trains independently as a single-pass model. Reference: TRM paper (Jolicoeur-Martineau, 2025).
 
 ### Legacy code removed
 The codebase has been streamlined to only the active experiment pipeline:
 - **Deleted models**: `models/hrm/`, `models/trm/`, `models/urm/urm.py` — the unified `models/urm/urm_energy.py` handles all modes via `ARCModelConfig.refinement`.
-- **Deleted losses**: `models/dsm_loss.py`, `models/trajectory_loss.py` — DSM was unnecessary given tractable second-order gradients; contrastive-only caused energy collapse.
-- **Simplified model**: Removed `inner_loops`, `_mcmc_steps()` (multi-step), `refine_with_mcmc()`, `capture_per_step_logits` infrastructure, `mcmc_steps`/`mcmc_training` config fields. All modes now do one step per `forward()` call.
+- **Deleted losses**: `models/dsm_loss.py`, `models/trajectory_loss.py`, `ACTLossHead` — DSM was unnecessary; contrastive-only caused energy collapse; ACTLossHead was the old carry-based loss head.
+- **Deleted carry infrastructure**: `ModelCarry` dataclass, `ARCBackbone.forward()`, `ARCBackbone.empty_carry()`, `ARCBackbone.reset_carry()`, `ARCModel.forward()`, `ARCModel.initial_carry()`, per-sample halting logic. Replaced by `forward_trajectory()`.
 - **MLP rounding fix**: `_find_multiple` granularity changed from 256 to 8 in `models/layers.py` to allow smooth capacity scaling at small model sizes (at h=64/exp=2, inter=88 instead of 256).
 - **Active configs**: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, plus R1 experiment configs.
 - **Active scripts**: `scripts/run_r1_rerun.sh` (current sweep), plus individual experiment scripts in `scripts/`.
 
-### Unified one-step-per-call architecture
-All three refinement modes do exactly one step of work per `forward()` call. The outer loop (pretrain.py) calls `forward()` repeatedly until `steps >= loops`, with identical halting logic and per-step metric collection for all modes.
+### Flat trajectory forward architecture
+`ARCModel.forward_trajectory(batch, N)` is the primary entry point. Runs N recurrence steps in a single call with full gradient flow. `EnergyLossHead.forward(batch)` calls `forward_trajectory` and computes deep supervision loss, per-step metrics, and eval stopping metrics. No carry state, no per-sample halting, no outer loop.
 
 Three config fields control behavior:
-- **`refinement`**: `"urm"` (one transformer pass) | `"ebt"` (one MCMC gradient step) | `"hybrid"` (URM if steps < mcmc_start_step, else MCMC) — what one step does.
-- **`stopping`**: `"qhalt"` (learned halt signal) | `"energy"` (energy convergence) — when to stop iterating.
+- **`refinement`**: `"urm"` (one transformer pass) | `"ebt"` (one MCMC gradient step) | `"hybrid"` (URM if step < mcmc_start_step, else MCMC) — what one step does.
+- **`stopping`**: `"qhalt"` (learned halt signal) | `"energy"` (energy convergence) — eval-only stopping criterion.
 - **`ranking`**: `"qhalt"` (Q-halt confidence) | `"energy"` (negative energy) — confidence signal for pass@K reranking.
 
 Active configs: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, plus R1 experiment configs (`urm_r1g_d1_h64.yaml`, `urm_r1f_d1.yaml`, `urm_r1h_d1_h128_exp4.yaml`, `urm_r1_15x15.yaml`).
 
-### Per-step exact accuracy logging
-At eval time, per-step metrics are computed in the outer eval loop in `pretrain.py` (not inside the model). Each outer halting step produces `step_k_exact_accuracy` (full puzzle solve rate) and `step_k_delta_norm` (hidden state change), logged to wandb under the `all.*` namespace. Use this to determine at which step the model's predictions plateau — critical for right-sizing the model.
+### Per-step metrics
+Per-step metrics are computed inside `EnergyLossHead` for both train and eval: `step_k_accuracy`, `step_k_exact_accuracy`, `step_k_delta_norm`. Eval mode additionally computes stopping metrics: `qhalt_stop_step`, `qhalt_stop_accuracy`, `energy_stop_step`, `energy_stop_accuracy`.
 
 ### Right-size the model for the problem
-The model must need most of its step budget to converge. Prior R1 experiments (all invalidated by the 8×8=64 bug, now fixed) showed flat per-step curves at depth=2 regardless of capacity. Current R1 re-run sweeps depth=1-2 with h=64-128 at 80K steps to find the right capacity where multi-step convergence emerges.
+The model must need most of its step budget to converge. Prior R1 experiments showed flat per-step curves because hidden states were detached between steps. With deep supervision and undetached gradient flow, multi-step convergence should emerge.
 
 ## Setup
 

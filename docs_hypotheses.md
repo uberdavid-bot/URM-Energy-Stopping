@@ -23,6 +23,20 @@ Experiments R1a–R1g used `loops=8` which controlled BOTH the inner recurrence 
 
 **Fix**: Simplified to one step per `forward()` call for all modes (URM, EBT, hybrid). Removed the inner loop entirely — `ARCBackbone.forward()` now does a single transformer pass. The outer loop in pretrain.py calls `forward()` repeatedly until halted, computing per-step exact accuracy and delta norms at each step. All three modes use the same halting logic, making per-step metrics directly comparable. All R1a–R1g results are invalid and are being re-run.
 
+### Root cause of flat per-step accuracy + deep supervision fix (2026-04-11)
+
+Root cause of flat per-step accuracy: `ARCBackbone.forward()` detached hidden states between carry-based steps (`hidden_states.detach()` at line 171), preventing cross-step gradient flow. Each step was independently trained as a single-pass model with shared weights — there was no learning signal for "produce intermediate representations that later steps can improve."
+
+**Fix**: Replaced carry-based outer loop with flat `forward_trajectory()` that runs all N steps in a single call with NO `.detach()` between steps. Gradients flow through the full trajectory. Added deep supervision: every step t gets reconstruction loss weighted by `(t+1)/N` (linear ramp), plus Q-halt BCE loss at every step. This gives the model a direct signal to improve across steps — earlier steps produce coarser representations, later steps refine them.
+
+Key changes:
+- `ARCModel.forward_trajectory(batch, N)` — new primary entry point, runs N recurrence steps with full gradient flow
+- `EnergyLossHead.forward(batch)` — computes deep supervision loss over the full trajectory in a single call
+- Carry-based loop removed entirely (ModelCarry, initial_carry, ARCBackbone.forward(), halting logic)
+- Stopping criteria (Q-halt convergence, energy convergence) are evaluated post-hoc on the full trajectory at eval time — not used during training
+- Per-step metrics (accuracy, exact accuracy, delta norm) computed inside EnergyLossHead for both train and eval
+- Reference: TRM paper (Jolicoeur-Martineau, 2025) found deep supervision to be the single largest contributor to recurrence benefit, doubling accuracy
+
 ### Experiment R1 — Right-sized baseline (find the scale)
 
 **R1a — hidden=64** (too small)

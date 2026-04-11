@@ -1,5 +1,4 @@
-from typing import Tuple, List, Dict, Optional
-from dataclasses import dataclass, replace
+from typing import Dict, Optional
 import math
 import torch
 import torch.nn.functional as F
@@ -8,15 +7,6 @@ from pydantic import BaseModel
 from models.common import trunc_normal_init_
 from models.layers import rms_norm, ConvSwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
 from models.sparse_embedding import CastedSparseEmbedding
-
-
-@dataclass
-class ModelCarry:
-    current_hidden: torch.Tensor
-    steps: Optional[torch.Tensor] = None
-    halted: Optional[torch.Tensor] = None
-    current_data: Optional[Dict[str, torch.Tensor]] = None
-    prev_energy: Optional[torch.Tensor] = None
 
 
 class ARCModelConfig(BaseModel):
@@ -137,51 +127,12 @@ class ARCBackbone(nn.Module):
             )
         return self.embed_scale * embedding
 
-    def empty_carry(self, batch_size: int) -> ModelCarry:
-        return ModelCarry(
-            current_hidden=torch.empty(
-                batch_size,
-                self.config.seq_len + self.puzzle_emb_len,
-                self.config.hidden_size,
-                dtype=self.forward_dtype,
-            ),
-        )
-
-    def reset_carry(self, reset_flag: torch.Tensor, carry: ModelCarry) -> ModelCarry:
-        new_hidden = torch.where(
-            reset_flag.view(-1, 1, 1),
-            self.init_hidden,
-            carry.current_hidden
-        )
-        return replace(carry, current_hidden=new_hidden)
-
-    def forward(
-        self,
-        carry: ModelCarry,
-        batch: Dict[str, torch.Tensor],
-    ) -> Tuple[ModelCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Single recurrence pass: input re-injection + transformer layers."""
-        seq_info = dict(cos_sin=self.rotary_emb())
-        input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
-
-        hidden_states = carry.current_hidden + input_embeddings
-        for layer in self.layers:
-            hidden_states = layer(hidden_states=hidden_states, **seq_info)
-
-        new_carry = replace(carry, current_hidden=hidden_states.detach())
-        output = self.lm_head(hidden_states)[:, self.puzzle_emb_len:]
-        q_logits = self.q_head(hidden_states[:, 0]).to(torch.float32)
-        return (new_carry, output, (q_logits[..., 0], q_logits[..., 1]))
-
 
 class ARCModel(nn.Module):
-    """Unified model: one step of refinement per forward() call.
+    """Unified model supporting URM, EBT, and hybrid refinement modes.
 
-    URM mode: one transformer pass (input re-injection + layers).
-    EBT mode: one MCMC gradient step in hidden space.
-    Hybrid mode: URM pass if steps < mcmc_start_step, else MCMC step.
-
-    The outer loop (pretrain.py) calls forward() repeatedly until halted.
+    Primary entry point: forward_trajectory() runs N recurrence steps with
+    full gradient flow (no detach between steps) for deep supervision.
     """
 
     def __init__(self, config_dict: dict):
@@ -215,16 +166,6 @@ class ARCModel(nn.Module):
         energy = self.energy_head(h_pooled)
         return energy.squeeze(-1)
 
-    def initial_carry(self, batch: Dict[str, torch.Tensor]) -> ModelCarry:
-        batch_size = batch["inputs"].shape[0]
-        base = self.inner.empty_carry(batch_size)
-        return ModelCarry(
-            current_hidden=base.current_hidden,
-            steps=torch.zeros((batch_size,), dtype=torch.int32, device=batch["inputs"].device),
-            halted=torch.ones((batch_size,), dtype=torch.bool, device=batch["inputs"].device),
-            current_data={k: v.clone().detach() for k, v in batch.items()},
-        )
-
     def _mcmc_step(self, hidden: torch.Tensor, input_embeddings: torch.Tensor,
                    step_size: float, full_hidden: bool = False) -> torch.Tensor:
         """Single MCMC gradient step in hidden space.
@@ -251,98 +192,45 @@ class ARCModel(nn.Module):
 
         return hidden
 
-    def forward(
-        self,
-        carry: ModelCarry,
-        batch: Dict[str, torch.Tensor],
-        compute_target_q=False
-    ) -> Tuple[ModelCarry, Dict[str, torch.Tensor]]:
-        # 1. Carry management
-        new_carry = self.inner.reset_carry(carry.halted, carry)
-        new_steps = torch.where(carry.halted, 0, carry.steps)
-        new_current_data = {
-            k: torch.where(
-                carry.halted.view((-1,) + (1,) * (batch[k].ndim - 1)),
-                batch[k],
-                v
-            )
-            for k, v in carry.current_data.items()
-        }
+    def forward_trajectory(self, batch: Dict[str, torch.Tensor], N: Optional[int] = None):
+        """Run N recurrence steps with full gradient flow (no detach between steps).
 
-        input_embeddings = self.inner._input_embeddings(
-            new_current_data["inputs"], new_current_data["puzzle_identifiers"]
-        )
+        Returns per-step logits, per-step Q-halt logits, per-step hidden states,
+        and input_embeddings (for energy computation).
+        """
+        N = N or self.config.loops
+        input_embeddings = self.inner._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
+        seq_info = dict(cos_sin=self.inner.rotary_emb())
+        P = self.inner.puzzle_emb_len
 
-        unrefined_logits = None
+        # Initialize hidden state
+        hidden = self.inner.init_hidden.expand(
+            batch["inputs"].shape[0],
+            self.inner.config.seq_len + P, -1
+        ).clone()
 
-        if self.config.refinement == "ebt":
-            # EBT: one MCMC gradient step in hidden space
-            hidden = new_carry.current_hidden
-            hidden = self._mcmc_step(
-                hidden, input_embeddings,
-                self.config.mcmc_step_size, full_hidden=True,
-            )
-            logits = self.inner.lm_head(hidden)[:, self.inner.puzzle_emb_len:]
-            output_hidden = hidden[:, self.inner.puzzle_emb_len:].detach()
-            current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
-            carry_hidden = hidden.detach()
+        all_logits = []
+        all_q_logits = []
+        all_hidden = []
 
-        elif self.config.refinement == "hybrid":
-            # Hybrid: URM pass if steps < mcmc_start_step, else MCMC step
-            hidden = new_carry.current_hidden
-            if new_steps[0] < self.config.mcmc_start_step:
-                # URM phase: transformer pass
-                seq_info = dict(cos_sin=self.inner.rotary_emb())
+        for step in range(N):
+            if self.config.refinement == "urm" or (
+                self.config.refinement == "hybrid" and step < self.config.mcmc_start_step
+            ):
+                # URM update: input re-injection + transformer pass
                 hidden = hidden + input_embeddings
                 for layer in self.inner.layers:
                     hidden = layer(hidden_states=hidden, **seq_info)
             else:
-                # MCMC phase: energy gradient step
+                # EBT update: energy gradient step
                 hidden = self._mcmc_step(
-                    hidden, input_embeddings,
-                    self.config.mcmc_step_size, full_hidden=True,
+                    hidden, input_embeddings, self.config.mcmc_step_size, full_hidden=True
                 )
-            logits = self.inner.lm_head(hidden)[:, self.inner.puzzle_emb_len:]
-            output_hidden = hidden[:, self.inner.puzzle_emb_len:].detach()
-            current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
-            carry_hidden = hidden.detach()
 
-        else:
-            # URM: one transformer pass (input re-injection + layers)
-            new_carry_inner, logits, (q_halt_logits, q_continue_logits) = self.inner(
-                new_carry, new_current_data,
-            )
-            output_hidden = new_carry_inner.current_hidden[:, self.inner.puzzle_emb_len:]
-            current_energy = self.compute_joint_energy(input_embeddings, output_hidden)
-            carry_hidden = new_carry_inner.current_hidden
+            logits = self.inner.lm_head(hidden)[:, P:]
+            q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32)
+            all_logits.append(logits)
+            all_q_logits.append(q_logits)
+            all_hidden.append(hidden)
 
-        # Halting
-        with torch.no_grad():
-            new_steps = new_steps + 1
-            halted = (new_steps >= self.config.loops)
-            if self.training and carry.prev_energy is not None:
-                energy_change = torch.abs(current_energy - carry.prev_energy)
-                converged = energy_change < self.config.energy_threshold
-                halted = halted | (converged & (new_steps >= self.config.min_steps))
-
-        # Outputs
-        outputs = {
-            "logits": logits,
-            "current_energy": current_energy,
-            "output_hidden": output_hidden,
-            "q_halt_logits": torch.zeros_like(current_energy),
-            "q_continue_logits": torch.zeros_like(current_energy),
-        }
-        if unrefined_logits is not None:
-            outputs["unrefined_logits"] = unrefined_logits
-
-        return (
-            ModelCarry(
-                current_hidden=carry_hidden,
-                steps=new_steps,
-                halted=halted,
-                current_data=new_current_data,
-                prev_energy=current_energy.detach(),
-            ),
-            outputs,
-        )
+        return all_logits, all_q_logits, all_hidden, input_embeddings

@@ -104,7 +104,7 @@ class TestURMEnergyForward:
 class TestPerStepLogits:
     def test_per_step_logits_captured_at_eval(self):
         """Eval mode should capture per-step logits for convergence analysis."""
-        config = make_config(loops=4)
+        config = make_config(loops=4, inner_loops=4)
         model = ARCModel(config).to(DEVICE).eval()
 
         batch = make_batch(config)
@@ -143,7 +143,7 @@ class TestPerStepLogits:
         """EnergyLossHead should produce per-step accuracy metrics at eval."""
         from models.losses import EnergyLossHead
 
-        config = make_config(loops=4)
+        config = make_config(loops=4, inner_loops=4)
         model = ARCModel(config).to(DEVICE).eval()
         loss_head = EnergyLossHead(model, "stablemax_cross_entropy").to(DEVICE)
 

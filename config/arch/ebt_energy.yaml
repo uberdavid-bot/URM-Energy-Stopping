@@ -8,6 +8,7 @@ loss:
   loss_type: stablemax_cross_entropy
 
 loops: 8
+inner_loops: 1
 num_layers: 2
 hidden_size: 64
 num_heads: 4

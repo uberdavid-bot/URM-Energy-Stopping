@@ -113,9 +113,16 @@ Refinement modes and their training requirements:
 - **"ebt"**: Dual reconstruction loss. N MCMC steps from input_embeddings. Second-order gradients via create_graph=True.
 - **"hybrid"**: Dual reconstruction loss. M URM steps then (N-M) MCMC steps (controlled by `mcmc_start_step`). Second-order gradients through MCMC phase.
 
-## Recurrence Simplification
+## Recurrence Structure
 
-Single recurrence loop — every step gets gradients and can be evaluated. The legacy H_cycles/L_cycles memory optimization has been removed from the config and model. This makes "one URM step" and "one MCMC step" directly comparable units of compute.
+Two config fields control recurrence:
+- **`loops`**: Outer halting threshold — total recurrence steps before the model halts. The training/eval loop calls `ARCModel.forward()` repeatedly until `steps >= loops`.
+- **`inner_loops`**: Transformer passes per outer call — how many times `ARCBackbone.forward()` iterates through the shared-weight layers in a single call. Default 1.
+
+With `inner_loops=1, loops=8`: 8 outer calls × 1 inner pass = 8 total recurrence passes, each producing per-step metrics.
+With `inner_loops=8, loops=8` (legacy bug): 8 outer calls × 8 inner passes = 64 total passes, per-step metrics only captured the last 8.
+
+Per-step logits and delta norms are captured inside `ARCBackbone.forward()` (the inner loop), so `inner_loops` must be 1 for per-step metrics to reflect each total recurrence step.
 
 ## Evaluator
 

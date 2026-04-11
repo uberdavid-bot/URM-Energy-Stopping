@@ -35,6 +35,8 @@ class ARCModelConfig(BaseModel):
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
     loops: int
+    # loops = outer halting threshold (total recurrence steps), inner_loops = transformer passes per outer call
+    inner_loops: int = 1
     forward_dtype: str = "bfloat16"
     # Energy-specific
     energy_threshold: float = 0.005
@@ -170,7 +172,7 @@ class ARCBackbone(nn.Module):
         per_step_logits: List[torch.Tensor] = []
         per_step_delta_norms: List[torch.Tensor] = []
 
-        for _ in range(self.config.loops):
+        for _ in range(self.config.inner_loops):
             if capture_per_step_logits:
                 prev_hidden = hidden_states.detach()
             hidden_states = hidden_states + input_embeddings

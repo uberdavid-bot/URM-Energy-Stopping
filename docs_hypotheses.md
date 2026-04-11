@@ -17,6 +17,10 @@ See `docs_hypotheses_archived.md` for full details of prior experiments.
 
 ## New Experiment Series — Implicit vs Explicit Iterative Refinement
 
+### Critical bug fix: inner_loops separation (2026-04-10)
+
+Experiments R1a–R1g used `loops=8` which controlled BOTH the inner recurrence loop in `ARCBackbone.forward()` AND the outer halting threshold in `ARCModel.forward()`. This meant each puzzle got 8×8=64 total recurrence passes, and per-step metrics only captured the last 8 (passes 57–64), which appeared flat because the model had already converged. Fixed by adding `inner_loops=1` (transformer passes per outer call) separate from `loops=8` (outer halting threshold). All R1a–R1g results are invalid for per-step convergence analysis and are being re-run.
+
 ### Experiment R1 — Right-sized baseline (find the scale)
 
 **R1a — hidden=64** (too small)

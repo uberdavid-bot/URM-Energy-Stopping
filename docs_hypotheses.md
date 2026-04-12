@@ -429,6 +429,35 @@ Tested alternative eval-time ranking signals from R2b checkpoint (step 80K):
 
 ---
 
+### Experiment R2c/d/e — Position-aware energy head cascade
+Date: 2026-04-12
+
+Cascade of increasing energy head complexity. Run in order, stop when energy pass@K beats Q-halt.
+
+**Root cause of R2/R2b failure:** The energy head is `mean_pool -> Linear(64,1)` (65 params). Mean pooling destroys spatial information critical for ARC — whether a prediction is correct depends on *which positions* are wrong, not the average hidden state. Alternative eval-time ranking strategies (energy drop, best-step energy) confirmed this isn't a calibration issue — the features themselves lack discriminative power.
+
+**R2c — Per-position MLP -> sum (~2K new params)**
+Config: `urm_r2c_pos_mlp.yaml`. Replace mean_pool -> linear with per-position `Linear(64,32) -> SiLU -> Linear(32,1)` then sum across positions. Tests whether spatial preservation plus nonlinearity is sufficient.
+energy_head_type: position_mlp
+
+**R2d — Conv1d + per-position MLP -> sum (~3K new params)** — conditional on R2c failure
+Config: `urm_r2d_pos_conv.yaml`. Add `Conv1d(64,64,k=3,groups=16)` before per-position MLP. Adds local neighbor context — "is this position consistent with neighbors?"
+energy_head_type: position_conv_mlp
+
+**R2e — Dedicated attention + per-position MLP -> sum (~10K new params)** — conditional on R2d failure
+Config: `urm_r2e_pos_attn.yaml`. Add dedicated `nn.MultiheadAttention` layer (own parameters, not shared with backbone) before per-position MLP. Enables cross-position comparison optimized for verification.
+energy_head_type: position_attn_mlp
+
+Success criterion (same for all): Energy pass@K > Q-halt pass@K at any K.
+Key diagnostics: eval Spearman, energy pass@K, URM per-step accuracy (monitor for regression).
+
+### Result
+R2c: TBD
+R2d: TBD (contingent on R2c)
+R2e: TBD (contingent on R2d)
+
+---
+
 ### Experiment R2.5 — Energy reranking + stopping (eval only)
 Date: TBD
 Config: No new training. Use R2-trained checkpoint. Score URM pass@K candidates by energy. Compare to Q-halt ranking and stopping.

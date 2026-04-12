@@ -40,6 +40,9 @@ class ARCModelConfig(BaseModel):
     mcmc_step_size: float = 0.01
     # Hybrid: number of URM steps before switching to MCMC (must be < loops)
     mcmc_start_step: int = 0
+    # Energy head architecture: "linear" | "position_mlp" | "position_conv_mlp" | "position_attn_mlp"
+    energy_head_type: str = "linear"
+    energy_head_hidden: int = 32
 
 
 class ARCBlock(nn.Module):
@@ -130,6 +133,60 @@ class ARCBackbone(nn.Module):
         return self.embed_scale * embedding
 
 
+class PositionEnergyHead(nn.Module):
+    """Per-position energy projection, summed to scalar.
+
+    Replaces mean_pool -> Linear(H, 1) with per-position MLP -> sum.
+    Preserves spatial information that mean pooling destroys.
+    """
+
+    def __init__(self, hidden_size: int, mlp_hidden: int = 32,
+                 use_conv: bool = False, use_attn: bool = False,
+                 num_heads: int = 4, dtype=torch.bfloat16):
+        super().__init__()
+        self.use_conv = use_conv
+        self.use_attn = use_attn
+
+        if use_attn:
+            self.attn = nn.MultiheadAttention(
+                embed_dim=hidden_size,
+                num_heads=num_heads,
+                batch_first=True,
+                dtype=dtype,
+            )
+            self.attn_norm = nn.LayerNorm(hidden_size, dtype=dtype)
+
+        if use_conv:
+            self.conv = nn.Conv1d(
+                hidden_size, hidden_size,
+                kernel_size=3, padding=1,
+                groups=min(16, hidden_size),
+                bias=True,
+                dtype=dtype,
+            )
+            self.conv_act = nn.SiLU()
+
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, mlp_hidden, dtype=dtype),
+            nn.SiLU(),
+            nn.Linear(mlp_hidden, 1, dtype=dtype),
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """[B, seq_len, H] -> [B] scalar energy per example."""
+        if self.use_attn:
+            attn_out, _ = self.attn(hidden_states, hidden_states, hidden_states)
+            hidden_states = self.attn_norm(hidden_states + attn_out)
+
+        if self.use_conv:
+            conv_out = self.conv(hidden_states.transpose(1, 2)).transpose(1, 2)
+            hidden_states = hidden_states + self.conv_act(conv_out)
+
+        energy_per_pos = self.mlp(hidden_states)  # [B, seq_len, 1]
+        energy = energy_per_pos.sum(dim=1).squeeze(-1)  # [B]
+        return energy
+
+
 class ARCModel(nn.Module):
     """Unified model supporting URM, EBT, and hybrid refinement modes.
 
@@ -141,7 +198,18 @@ class ARCModel(nn.Module):
         super().__init__()
         self.config = ARCModelConfig(**config_dict)
         self.inner = ARCBackbone(self.config)
-        self.energy_head = nn.Linear(self.config.hidden_size, 1, dtype=self.inner.forward_dtype)
+
+        if self.config.energy_head_type == "linear":
+            self.energy_head = nn.Linear(self.config.hidden_size, 1, dtype=self.inner.forward_dtype)
+        else:
+            self.energy_head = PositionEnergyHead(
+                hidden_size=self.config.hidden_size,
+                mlp_hidden=self.config.energy_head_hidden,
+                use_conv=(self.config.energy_head_type == "position_conv_mlp"),
+                use_attn=(self.config.energy_head_type == "position_attn_mlp"),
+                num_heads=self.config.num_heads,
+                dtype=self.inner.forward_dtype,
+            )
 
     @property
     def puzzle_emb(self):
@@ -164,9 +232,12 @@ class ARCModel(nn.Module):
         for layer in self.inner.layers:
             hidden_states = layer(cos_sin=cos_sin, hidden_states=hidden_states)
 
-        h_pooled = hidden_states.mean(dim=1)
-        energy = self.energy_head(h_pooled)
-        return energy.squeeze(-1)
+        if self.config.energy_head_type == "linear":
+            h_pooled = hidden_states.mean(dim=1)
+            energy = self.energy_head(h_pooled)
+            return energy.squeeze(-1)
+        else:
+            return self.energy_head(hidden_states)
 
     def _mcmc_step(self, hidden: torch.Tensor, input_embeddings: torch.Tensor,
                    step_size: float, full_hidden: bool = False) -> torch.Tensor:

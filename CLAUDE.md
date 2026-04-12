@@ -92,21 +92,29 @@ Training uses deep supervision: every recurrence step t gets reconstruction loss
 ### Legacy code removed
 The codebase has been streamlined to only the active experiment pipeline:
 - **Deleted models**: `models/hrm/`, `models/trm/`, `models/urm/urm.py` — the unified `models/urm/urm_energy.py` handles all modes via `ARCModelConfig.refinement`.
-- **Deleted losses**: `models/dsm_loss.py`, `models/trajectory_loss.py`, `ACTLossHead` — DSM was unnecessary; contrastive-only caused energy collapse; ACTLossHead was the old carry-based loss head.
+- **Deleted losses**: `models/dsm_loss.py`, `ACTLossHead` — DSM was unnecessary; contrastive-only caused energy collapse; ACTLossHead was the old carry-based loss head. Note: `models/trajectory_loss.py` was re-created for R2 (trajectory ranking loss for energy head co-training).
 - **Deleted carry infrastructure**: `ModelCarry` dataclass, `ARCBackbone.forward()`, `ARCBackbone.empty_carry()`, `ARCBackbone.reset_carry()`, `ARCModel.forward()`, `ARCModel.initial_carry()`, per-sample halting logic. Replaced by `forward_trajectory()`.
 - **MLP rounding fix**: `_find_multiple` granularity changed from 256 to 8 in `models/layers.py` to allow smooth capacity scaling at small model sizes (at h=64/exp=2, inter=88 instead of 256).
 - **Active configs**: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, plus R1 experiment configs.
-- **Active scripts**: `scripts/run_r1_rerun.sh` (current sweep), plus individual experiment scripts in `scripts/`.
+- **Active scripts**: `scripts/train_r2_trajectory.sh` (R2), `scripts/run_r1_rerun.sh` (R1 sweep), plus individual experiment scripts in `scripts/`.
 
 ### Flat trajectory forward architecture
 `ARCModel.forward_trajectory(batch, N)` is the primary entry point. Runs N recurrence steps in a single call with full gradient flow. `EnergyLossHead.forward(batch)` calls `forward_trajectory` and computes deep supervision loss, per-step metrics, and eval stopping metrics. No carry state, no per-sample halting, no outer loop.
 
-Three config fields control behavior:
+Three model config fields control behavior:
 - **`refinement`**: `"urm"` (one transformer pass) | `"ebt"` (one MCMC gradient step) | `"hybrid"` (URM if step < mcmc_start_step, else MCMC) — what one step does.
 - **`stopping`**: `"qhalt"` (learned halt signal) | `"energy"` (energy convergence) — eval-only stopping criterion.
 - **`ranking`**: `"qhalt"` (Q-halt confidence) | `"energy"` (negative energy) — confidence signal for pass@K reranking.
 
-Active configs: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, plus R1 experiment configs (`urm_r1g_d1_h64.yaml`, `urm_r1f_d1.yaml`, `urm_r1h_d1_h128_exp4.yaml`, `urm_r1_15x15.yaml`).
+Two loss config fields control energy head co-training (R2):
+- **`energy_loss_weight`**: float (default 0.0). When > 0, adds trajectory ranking loss to total loss. Weight 0.1 used in R2.
+- **`ranking_margin`**: float (default 0.1). Margin for all-pairs ranking loss.
+
+Two pretrain config fields control gradient clipping:
+- **`grad_clip_backbone`**: float (default 5.0). Max gradient norm for backbone parameters.
+- **`grad_clip_energy_head`**: float (default 1.0). Max gradient norm for energy head parameters.
+
+Active configs: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, `config/arch/urm_r2_trajectory.yaml`, plus R1 experiment configs (`urm_r1g_d1_h64.yaml`, `urm_r1f_d1.yaml`, `urm_r1h_d1_h128_exp4.yaml`, `urm_r1_15x15.yaml`).
 
 ### Per-step metrics
 Per-step metrics are computed inside `EnergyLossHead` for both train and eval: `step_k_accuracy`, `step_k_exact_accuracy`, `step_k_delta_norm`. Eval mode additionally computes stopping metrics: `qhalt_stop_step`, `qhalt_stop_accuracy`, `energy_stop_step`, `energy_stop_accuracy`.
@@ -114,8 +122,8 @@ Per-step metrics are computed inside `EnergyLossHead` for both train and eval: `
 ### Right-size the model for the problem
 Validated config: depth=1, h=64, expansion=2, 8 steps, 10×10 grids, ~35K params. R1h confirmed monotonic per-step accuracy ramp (0.13% → 3.76% exact accuracy step 1→6). Prior R1 experiments showed flat per-step curves because hidden states were detached between steps; deep supervision + cross-step gradient flow fixed this.
 
-### Energy head is untrained in URM mode
-In URM refinement mode, `compute_joint_energy` is only called inside `torch.no_grad()` blocks (for eval metrics). The energy head receives zero training gradient. The `energy_stop_step` and `energy_stop_accuracy` eval metrics currently measure backbone hidden state convergence (since the energy head reuses backbone transformer layers), not learned energy structure. Training the energy head requires either: (a) trajectory ranking loss (Phase 2, first-order), or (b) EBT/hybrid mode where `_mcmc_step` calls `compute_joint_energy` with `create_graph=True`.
+### Energy head training status
+In pure URM mode (R1h config), the energy head receives zero training gradient — `compute_joint_energy` is only called inside `torch.no_grad()` for eval metrics. R2 adds trajectory ranking loss (`energy_loss_weight > 0`) which co-trains the energy head alongside URM via `models/trajectory_loss.py`. R2 result: energy head learns perfect training correlation (Spearman ρ → -1.0) but overfits — eval Spearman only -0.48, energy reranking far worse than Q-halt. The energy head memorizes training-specific hidden state patterns rather than learning abstract quality. Next step: R3 (MCMC) may help by giving the energy head diverse hidden states beyond fixed URM trajectories.
 
 ## Setup
 

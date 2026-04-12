@@ -324,7 +324,68 @@ Inspired by: Exp 4 (trajectory supervision worked when quality spread existed), 
 Risk: Shared backbone means trajectory ranking gradients modify URM weights — monitor for URM regression. Quality spread on training data may collapse faster than on eval data due to train/eval gap (20.7% vs 3.76% exact in R1h).
 
 ### Result
-TBD
+**Energy head learns correct ordering — Spearman ρ = -0.48, all 28 pairs active. URM NOT regressed. Energy reranking far worse than Q-halt.** 35,210 params. Wandb: `R2-trajectory-d1-h64-260411` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/m3fzbof3))
+
+**Eval per-step accuracy (final checkpoint, 80K steps):**
+
+| Step | Token Acc | Exact Acc | Delta Norm |
+|------|-----------|-----------|------------|
+| 1 | 66.9% | 0.10% | — |
+| 2 | 74.6% | 0.35% | 0.0080 |
+| 3 | 77.4% | 1.38% | 0.0043 |
+| 4 | 78.5% | 3.25% | 0.0026 |
+| 5 | 78.9% | 3.89% | 0.0018 |
+| 6 | **79.0%** | **3.87%** | 0.0014 |
+| 7 | 78.9% | 3.57% | 0.0011 |
+| 8 | 78.8% | 2.93% | 0.0009 |
+
+**No URM regression vs R1h baseline.** Per-step accuracy curve is nearly identical to R1h (66.8%→78.9% vs 66.9%→78.8% token acc; 0.13%→3.76% vs 0.10%→3.87% peak exact). The trajectory ranking loss at weight=0.1 does not interfere with URM training. Training speed: 7.0 it/s (R1h: ~5.8 it/s — faster due to different batch scheduling).
+
+**Energy head diagnostics (training):**
+
+| Metric | Step 336 | Step 7K | Step 39K | Step 78K |
+|--------|----------|---------|----------|----------|
+| Spearman ρ | -0.22 | -0.69 | -0.98 | -1.00 |
+| Active pairs | 28/28 | 28/28 | 28/28 | 28/28 |
+| Cosine sim | -0.12 | -0.05 | -0.10 | -0.11 |
+
+Train Spearman rapidly reaches -0.98 to -1.0 (perfect negative correlation: lower energy = higher quality). All 28 pairs remain active throughout training. Cosine similarity is consistently negative (-0.05 to -0.12), indicating energy gradients point toward better hidden states (R3 favorable).
+
+**Energy head diagnostics (eval):**
+
+| Checkpoint | Spearman ρ | Active | Cosine | Energy pass@100 | Energy pass@1K |
+|------------|-----------|--------|--------|-----------------|----------------|
+| 1 (5.3K) | -0.13 | 28 | +0.01 | 2.6% | 4.5% |
+| 3 (16K) | -0.57 | 28 | -0.01 | 1.3% | 7.8% |
+| 6 (32K) | -0.55 | 28 | -0.02 | 2.6% | 14.9% |
+| 9 (48K) | -0.52 | 28 | -0.01 | 1.3% | 13.0% |
+| 12 (64K) | -0.50 | 28 | -0.01 | 1.3% | 12.3% |
+| 15 (80K) | -0.48 | 28 | -0.01 | 1.3% | 12.3% |
+
+Eval Spearman stabilizes at -0.48 to -0.55 (moderately negative). Significantly weaker than training (-0.98), indicating the energy head generalizes poorly to eval data. Cosine similarity is near zero on eval (vs -0.10 on train), suggesting the energy gradient signal doesn't generalize well.
+
+**pass@K comparison (final checkpoint):**
+
+| K | Q-halt | Energy |
+|---|--------|--------|
+| 1 | 5.8% | 0% |
+| 10 | 16.9% | 0% |
+| 100 | 22.7% | 1.3% |
+| 1000 | 26.0% | 12.3% |
+
+Energy reranking is **dramatically worse** than Q-halt at all K values. At pass@100: 22.7% vs 1.3%. At pass@1000: 26.0% vs 12.3%. The energy head learns the correct ordering on training data (ρ = -1.0) but doesn't generalize to eval — this is a verification overfitting problem.
+
+**Stopping comparison:**
+- Q-halt stop: step 7.4, accuracy 2.68%
+- Energy stop: step 7.1, accuracy 3.07%
+
+Energy stopping slightly outperforms Q-halt stopping (3.07% vs 2.68%) by stopping earlier (7.1 vs 7.4 steps). This is marginal.
+
+**Conclusion:** The trajectory ranking loss successfully trains the energy head without regressing URM performance. On training data, the energy head achieves near-perfect correlation with hidden state quality (ρ → -1.0). However, the energy head **overfits badly** to training trajectories — eval Spearman is only -0.48, and energy reranking is far worse than Q-halt for pass@K. The shared backbone architecture means the energy head sees training-specific hidden state patterns that don't transfer to eval.
+
+Key finding: verification via trajectory ranking works mechanistically (the energy head learns to rank steps correctly) but doesn't generalize across puzzles. The energy function doesn't capture abstract quality — it memorizes training-specific patterns. This suggests trajectory ranking alone is insufficient; the energy head needs exposure to diverse hidden states (which MCMC in R3 would provide by generating varied trajectories) or a different training signal that encourages generalization (e.g., puzzle-independent features).
+
+The cosine similarity diagnostic is weakly negative on train (-0.10) and near-zero on eval, suggesting MCMC gradients would provide marginal directional signal at best. R3 may still be worth trying because MCMC training would give the energy head a fundamentally different training distribution (gradient-optimized hidden states vs fixed URM trajectories).
 
 ---
 

@@ -403,6 +403,20 @@ The cosine similarity diagnostic is weakly negative on train (-0.10) and near-ze
 
 ---
 
+### Experiment R2b — Energy verifier via trajectory ranking (dropout backbone)
+Date: 2026-04-12
+Script: `scripts/train_r2b_trajectory_dropout.sh`
+Config: `config/arch/urm_r2b_trajectory_dropout.yaml` — same as R2 + attn_dropout=0.1, mlp_dropout=0.1 from R1i.
+Hypothesis: R2's energy head overfitting (train Spearman -1.0 vs eval -0.48) was caused by backbone overfitting (train/eval exact accuracy ratio 6:1). R1i reduced this to 3.7:1 via dropout. With a regularized backbone, the energy head should learn more generalizable quality features, improving eval Spearman and energy pass@K.
+Expected outcome: Eval Spearman correlation improves from -0.48 toward -0.7+. Energy pass@K becomes competitive with Q-halt at some K values. URM eval metrics match or exceed R1i (5.3% exact accuracy). Active pairs remain high.
+Success criterion: Energy reranking improves pass@K over Q-halt at some K values (R2.5 gate). Eval Spearman < -0.6.
+Risk: Dropout may not be sufficient — energy head generalization may require fundamentally different architecture (separate parameters from backbone) rather than just backbone regularization.
+
+### Result
+TBD
+
+---
+
 ### Experiment R2.5 — Energy reranking + stopping (eval only)
 Date: TBD
 Config: No new training. Use R2-trained checkpoint. Score URM pass@K candidates by energy. Compare to Q-halt ranking and stopping.

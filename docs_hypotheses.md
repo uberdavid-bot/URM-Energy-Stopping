@@ -413,7 +413,19 @@ Success criterion: Energy reranking improves pass@K over Q-halt at some K values
 Risk: Dropout may not be sufficient — energy head generalization may require fundamentally different architecture (separate parameters from backbone) rather than just backbone regularization.
 
 ### Result
-TBD
+TBD (full R2b results pending — see energy ranking comparison below)
+
+#### R2b Energy Ranking Strategy Comparison (eval-only)
+Tested alternative eval-time ranking signals from R2b checkpoint (step 80K):
+
+| Ranking Strategy | pass@1 | pass@2 | pass@5 | pass@10 | pass@100 | pass@1000 |
+|---|---|---|---|---|---|---|
+| Q-halt | 12.3% | 12.3% | 16.9% | 20.8% | 23.4% | 23.4% |
+| -E_final (current) | 0.6% | 0.6% | 1.9% | 1.9% | 14.9% | 23.4% |
+| Energy drop (E1-E8) | 0.6% | 0.6% | 0.6% | 0.6% | 15.6% | 23.4% |
+| -E_step6 (best step) | 0.0% | 0.0% | 1.9% | 1.9% | 14.9% | 23.4% |
+
+**Interpretation:** All energy ranking strategies converge at pass@1000 (23.4%, same as Q-halt) — the energy head doesn't filter out correct predictions, it just can't rank them. Q-halt dominates at all practical K values (12.3% pass@1 vs 0.0-0.6%). Energy drop (E1-E8) is slightly better at pass@100 (15.6% vs 14.9%) but no better otherwise. The energy head with trajectory ranking doesn't learn a useful ranking signal regardless of which step's energy we use. The problem isn't which energy value to use — it's that the energy function doesn't capture prediction quality in a generalizable way.
 
 ---
 

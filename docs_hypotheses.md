@@ -310,6 +310,20 @@ Stopping metrics: qhalt_stop_step=7.5 (2.6% acc), energy_stop_step=6.3 (3.2% acc
 
 ---
 
+### Experiment R1i — Dropout regularization (prerequisite for R2 retry)
+Date: 2026-04-11
+Script: `scripts/train_r1i_dropout.sh`
+Config: `config/arch/urm_r1i_dropout.yaml` — same as R1h (d=1, h=64, exp=2, 8 steps) + attn_dropout=0.1, mlp_dropout=0.1.
+Hypothesis: Dropout closes the train/eval exact accuracy gap (23.2% vs 2.9% in R1h / 3.8% in R1h eval peak). The energy head's failure to generalize in R2 was caused by backbone overfitting, not energy head design. With a regularized backbone, trajectory ranking should produce eval Spearman correlation closer to train.
+Expected outcome: Train exact accuracy decreases (expected with dropout). Eval exact accuracy increases or stays similar. Train/eval gap shrinks substantially. Per-step monotonic improvement preserved.
+Success criterion: Train/eval exact accuracy ratio < 3:1 (vs ~8:1 in R1h). If met, re-run R2 on this backbone.
+Fallback: If dropout=0.1 kills learning (eval accuracy drops below R1h), retry with dropout=0.05. If that also fails, scale to h=96 with dropout.
+
+### Result
+TBD
+
+---
+
 ### Experiment R2 — Energy verifier via trajectory ranking (first-order)
 Date: 2026-04-11
 Script: `scripts/train_r2_trajectory.sh`

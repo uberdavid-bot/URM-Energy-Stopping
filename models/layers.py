@@ -106,6 +106,8 @@ class Attention(nn.Module):
         self.num_key_value_heads = num_key_value_heads
         self.causal = causal
 
+        self.attn_dropout = attn_dropout
+
         self.qkv_proj = CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False)
         self.o_proj = CastedLinear(self.output_size, self.hidden_size, bias=False)
 
@@ -127,7 +129,7 @@ class Attention(nn.Module):
             query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
         # flash attn
-        attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal)
+        attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal, dropout_p=self.attn_dropout if self.training else 0.0)
         if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
             attn_output = attn_output[0]
 

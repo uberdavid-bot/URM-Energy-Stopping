@@ -1,0 +1,30 @@
+# R1i: Same as R1h (d=1, h=64, exp=2) + dropout regularization
+# Testing whether dropout closes the 23% vs 3% train/eval exact accuracy gap
+# that blocked energy head generalization in R2.
+
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+
+loops: 8
+num_layers: 1
+hidden_size: 64
+num_heads: 4
+expansion: 2
+
+attn_dropout: 0.1
+mlp_dropout: 0.1
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+energy_threshold: 0.005
+min_steps: 8
+
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+
+ema: True
+ema_rate: 0.999

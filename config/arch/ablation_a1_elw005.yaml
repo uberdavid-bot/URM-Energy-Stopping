@@ -1,0 +1,32 @@
+# A1: Energy loss weight = 0.05 (2x lower than R2c)
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+  energy_loss_weight: 0.05
+  ranking_margin: 0.1
+
+loops: 8
+num_layers: 1
+hidden_size: 64
+num_heads: 4
+expansion: 2
+
+attn_dropout: 0.1
+mlp_dropout: 0.1
+
+energy_head_type: position_mlp
+energy_head_hidden: 32
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+energy_threshold: 0.005
+min_steps: 8
+
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+
+ema: True
+ema_rate: 0.999

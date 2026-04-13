@@ -543,6 +543,38 @@ TBD
 
 ---
 
+### Ablation Series A — Why does energy co-training improve the backbone?
+
+R2c discovered that energy co-training with trajectory ranking improves the backbone by 30% (6.95% vs 5.33% eval exact) even though the energy function itself doesn't generalize (0% energy pass@10, eval Spearman -0.069). These ablations isolate the mechanism.
+
+**Hypothesis:** The trajectory ranking loss provides useful gradient diversity through the shared backbone layers, acting as multi-task regularization. This is tested by varying the loss weight (A1), replacing the signal with random noise (A2), and blocking gradient flow to the backbone (A3).
+
+#### A1 — Energy loss weight sweep
+Configs: `ablation_a1_elw001.yaml` (0.01), `ablation_a1_elw005.yaml` (0.05), `ablation_a1_elw020.yaml` (0.2), `ablation_a1_elw050.yaml` (0.5). R2c used 0.1.
+Question: Is there a sweet spot for `energy_loss_weight`, or does the backbone improvement scale monotonically? If flat across a wide range → gradient direction matters, not magnitude. If peaked → optimal regularization strength exists. If monotonically increasing → more energy gradient = more regularization.
+
+#### A2 — Random auxiliary head (shuffled quality labels)
+Config: `ablation_a2_random.yaml`. Same as R2c but quality labels randomly permuted each forward pass.
+Question: Does the backbone improvement require *correct* trajectory ordering, or does *any* auxiliary gradient through the energy head help? If backbone improves similarly → mechanism is pure gradient diversity / multi-task regularization. If backbone improvement disappears → the trajectory ordering signal specifically helps.
+
+#### A3 — Frozen energy head (detached hidden states)
+Config: `ablation_a3_detach.yaml`. Same as R2c but hidden states detached before energy head — energy head trains but gradients don't flow into backbone.
+Question: Does the backbone improvement require gradient flow from the energy head *into* the backbone? If backbone improvement disappears → the mechanism is gradient flow through shared layers (the energy loss modifies backbone weights). If backbone still improves → having extra parameters / forward computation alone helps (unlikely but would be surprising).
+
+#### Expected interpretation matrix:
+
+| A1 shape | A2 result | A3 result | Interpretation |
+|----------|-----------|-----------|---------------|
+| Peaked ~0.1 | A2 < R2c | A3 ≈ R1i | Trajectory-specific gradient regularization at optimal strength |
+| Flat | A2 ≈ R2c | A3 ≈ R1i | Any auxiliary gradient through energy head helps; not trajectory-specific |
+| Flat | A2 < R2c | A3 ≈ R1i | Trajectory ordering needed, but robust to weight |
+| Any | A2 ≈ R2c | A3 ≈ R2c | Extra parameters help (not gradient flow) — very unlikely |
+
+### Results
+TBD
+
+---
+
 ## Lessons Carried Forward
 1. **Dual reconstruction loss is mandatory** for MCMC training (Exp 3a).
 2. **Contrastive loss alone causes energy collapse** (Exp 1). Use trajectory ranking as primary energy training signal (first-order, R2). MCMC reconstruction provides second-order signal in R3.

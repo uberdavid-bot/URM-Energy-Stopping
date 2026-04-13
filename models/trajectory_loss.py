@@ -5,7 +5,8 @@ from scipy.stats import spearmanr
 IGNORE_LABEL_ID = -100
 
 
-def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddings, margin=0.1):
+def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddings, margin=0.1,
+                            shuffle_quality=False, detach_hidden=False):
     """All-pairs weighted margin ranking loss across URM trajectory steps.
 
     For each pair (i, j) where step i has higher quality than step j:
@@ -20,6 +21,8 @@ def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddi
         labels: [B, seq_len] with IGNORE_LABEL_ID=-100 for padding
         input_embeddings: [B, seq_len + P, hidden_dim]
         margin: margin for ranking loss
+        shuffle_quality: A2 ablation — randomly permute quality scores
+        detach_hidden: A3 ablation — detach hidden/input_emb before energy head
 
     Returns:
         loss: scalar trajectory ranking loss
@@ -43,10 +46,22 @@ def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddi
             quality = (correct / loss_counts.clamp(min=1)).mean()  # scalar
             qualities.append(quality.item())
 
-    # --- Per-step energy (NOT detached — co-training) ---
+    # A2 ablation: shuffle quality ordering (preserves gradient path, breaks signal)
+    if shuffle_quality:
+        perm = torch.randperm(len(qualities))
+        qualities = [qualities[i] for i in perm]
+
+    # A3 ablation: detach hidden states before energy head
+    if detach_hidden:
+        input_emb_for_energy = input_embeddings.detach()
+    else:
+        input_emb_for_energy = input_embeddings
+
+    # --- Per-step energy (NOT detached — co-training, unless A3 ablation) ---
     energies = []
     for t in range(N):
-        energy = model.compute_joint_energy(input_embeddings, all_hidden[t][:, P:])
+        hidden_for_energy = all_hidden[t][:, P:].detach() if detach_hidden else all_hidden[t][:, P:]
+        energy = model.compute_joint_energy(input_emb_for_energy, hidden_for_energy)
         energies.append(energy.mean())
 
     energies_tensor = torch.stack(energies)  # [N]

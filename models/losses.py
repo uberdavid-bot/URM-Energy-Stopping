@@ -40,12 +40,15 @@ def softmax_cross_entropy(logits, labels, ignore_index: int = -100):
 
 
 class EnergyLossHead(nn.Module):
-    def __init__(self, model: nn.Module, loss_type: str, energy_loss_weight: float = 0.0, ranking_margin: float = 0.1):
+    def __init__(self, model: nn.Module, loss_type: str, energy_loss_weight: float = 0.0, ranking_margin: float = 0.1,
+                 shuffle_trajectory_quality: bool = False, detach_energy_hidden: bool = False):
         super().__init__()
         self.model = model
         self.loss_fn = globals()[loss_type]
         self.energy_loss_weight = energy_loss_weight
         self.ranking_margin = ranking_margin
+        self.shuffle_trajectory_quality = shuffle_trajectory_quality  # A2 ablation
+        self.detach_energy_hidden = detach_energy_hidden  # A3 ablation
 
     def forward(
         self,
@@ -101,7 +104,8 @@ class EnergyLossHead(nn.Module):
         ranking_metrics = None
         if self.energy_loss_weight > 0:
             ranking_loss, ranking_metrics = trajectory_ranking_loss(
-                self.model, all_hidden, all_logits, labels, input_embeddings, self.ranking_margin
+                self.model, all_hidden, all_logits, labels, input_embeddings, self.ranking_margin,
+                shuffle_quality=self.shuffle_trajectory_quality, detach_hidden=self.detach_energy_hidden,
             )
             total_loss = total_loss + self.energy_loss_weight * ranking_loss
 

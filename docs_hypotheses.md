@@ -320,7 +320,22 @@ Success criterion: Train/eval exact accuracy ratio < 3:1 (vs ~8:1 in R1h). If me
 Fallback: If dropout=0.1 kills learning (eval accuracy drops below R1h), retry with dropout=0.05. If that also fails, scale to h=96 with dropout.
 
 ### Result
-TBD
+**Dropout closes the gap — eval exact accuracy 5.33% (vs 3.76% without dropout).** 35,210 params. Wandb: `R1i-dropout-d1-h64-260411` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/lmzfasu2))
+
+| Step | Token Acc | Exact Acc | Delta Norm |
+|------|-----------|-----------|------------|
+| 1 | 67.4% | 0.06% | — |
+| 2 | 74.8% | 0.26% | 0.0075 |
+| 3 | 78.0% | 1.91% | 0.0040 |
+| 4 | 79.1% | 4.02% | 0.0024 |
+| 5 | 79.6% | 5.04% | 0.0016 |
+| 6 | **79.7%** | **5.33%** | 0.0011 |
+| 7 | 79.7% | 5.32% | 0.0009 |
+| 8 | 79.6% | 5.12% | 0.0007 |
+
+Train exact accuracy: 19.7% (vs R1h 19.1%). Train/eval ratio: 3.9:1 (vs R1h 6.0:1). Per-step monotonic improvement preserved. pass@K (Q-halt): 5.2% @1, 16.2% @10, 21.4% @100, 22.1% @1000.
+
+**Conclusion:** Dropout=0.1 successfully reduces overfitting without hurting learning. Eval exact accuracy improved 42% (3.76% → 5.33%). Train/eval ratio compressed from 6:1 to 3.9:1. This is the new standard backbone for energy experiments.
 
 ---
 
@@ -413,7 +428,22 @@ Success criterion: Energy reranking improves pass@K over Q-halt at some K values
 Risk: Dropout may not be sufficient — energy head generalization may require fundamentally different architecture (separate parameters from backbone) rather than just backbone regularization.
 
 ### Result
-TBD (full R2b results pending — see energy ranking comparison below)
+**Eval Spearman improved to -0.585 (vs R2's -0.484). Energy ranking still fails. URM matches R1i baseline.** 35,210 params. Wandb: `R2b-traj-dropout-d1-h64-260412` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/d21szemv))
+
+| Step | Token Acc | Exact Acc | Delta Norm |
+|------|-----------|-----------|------------|
+| 1 | 67.4% | 0.04% | — |
+| 2 | 75.2% | 0.60% | 0.0076 |
+| 3 | 78.2% | 2.27% | 0.0040 |
+| 4 | 79.3% | 4.72% | 0.0024 |
+| 5 | 79.6% | 5.41% | 0.0016 |
+| 6 | **79.7%** | **5.49%** | 0.0011 |
+| 7 | 79.7% | 5.35% | 0.0009 |
+| 8 | 79.6% | 5.04% | 0.0007 |
+
+Train/eval ratio: 3.9:1 (matches R1i). Eval Spearman: -0.585 (improved from R2's -0.484). Train Spearman: -0.905. Cosine similarity: -0.013 (eval), -0.057 (train). pass@K (Q-halt): 3.9% @1, 19.5% @10, 22.7% @100, 24.7% @1000. pass@K (Energy): 0% @1, 0% @10, 1.3% @100, 11.7% @1000.
+
+**Conclusion:** Dropout improved eval Spearman modestly (-0.484 → -0.585) but energy pass@K is still dramatically worse than Q-halt. The energy head can rank within-trajectory steps but cannot discriminate across different inputs/puzzles. Dropout helped the backbone but didn't solve the fundamental energy ranking problem.
 
 #### R2b Energy Ranking Strategy Comparison (eval-only)
 Tested alternative eval-time ranking signals from R2b checkpoint (step 80K):
@@ -452,9 +482,27 @@ Success criterion (same for all): Energy pass@K > Q-halt pass@K at any K.
 Key diagnostics: eval Spearman, energy pass@K, URM per-step accuracy (monitor for regression).
 
 ### Result
-R2c: TBD
-R2d: TBD (contingent on R2c)
-R2e: TBD (contingent on R2d)
+**R2c: Best URM yet (6.95% eval exact) but energy ranking still fails. Eval Spearman collapsed to -0.069.** 37,258 params. Wandb: `R2c-pos-mlp-d1-h64-260412` ([link](https://wandb.ai/uberdavid-personal/arcagi/runs/rbbrk0fh))
+
+| Step | Token Acc | Exact Acc | Delta Norm |
+|------|-----------|-----------|------------|
+| 1 | 67.3% | 0.07% | — |
+| 2 | 75.2% | 0.57% | 0.0076 |
+| 3 | 78.3% | 3.18% | 0.0041 |
+| 4 | 79.5% | 5.86% | 0.0024 |
+| 5 | 79.8% | 6.80% | 0.0016 |
+| 6 | **79.9%** | **6.95%** | 0.0011 |
+| 7 | 79.9% | 6.87% | 0.0009 |
+| 8 | 79.8% | 6.51% | 0.0007 |
+
+Train/eval ratio: 3.3:1 (best yet). Eval Spearman: **-0.069** (collapsed vs R2b's -0.585). Train Spearman: -0.958. pass@K (Q-halt): 4.5% @1, 20.1% @10, **26.0%** @100, **29.2%** @1000. pass@K (Energy): 0% @1, 0% @10, 2.6% @100, 16.2% @1000.
+
+**Paradox:** The position-aware energy head produces the best backbone (6.95% eval exact, Q-halt pass@100=26.0% vs R2b's 22.7%) while completely failing at its intended job (eval Spearman near zero). The energy co-training gradient helps as a multi-task regularizer even though the energy function doesn't generalize. Energy pass@K improved slightly (16.2% vs 11.7% at pass@1000) but is still far from Q-halt (29.2%).
+
+**Decision:** Energy ranking has failed across linear (R2/R2b) and position-aware (R2c) heads. The within-trajectory ranking signal (Spearman) doesn't transfer to cross-input ranking (pass@K). R2d/R2e are unlikely to change this — more energy head capacity makes the Spearman *worse* on eval (more overfitting). The cascade should stop here.
+
+R2d: Skipped — R2c showed more capacity worsens eval Spearman.
+R2e: Skipped — same reasoning.
 
 ---
 
@@ -502,3 +550,9 @@ TBD
 4. **MCMC must operate in hidden space**, not soft-embedding space.
 5. **Don't detach between MCMC steps during training.** Energy head needs multi-step trajectory gradients.
 6. **Budget in steps, not epochs.**
+7. **Deep supervision is the fix for flat per-step curves** (R1h). Without cross-step gradient flow, each recurrence step trains independently and convergence is flat. Reference: TRM paper.
+8. **Dropout=0.1 reduces backbone overfitting** (R1i). Train/eval exact accuracy ratio compressed from 6:1 to 3.9:1. Eval exact improved 42% (3.76% → 5.33%). Use as standard backbone for all future experiments.
+9. **Within-trajectory ranking ≠ cross-input ranking** (R2/R2b/R2c). The energy head learns to rank steps within a trajectory perfectly (train Spearman → -1.0) but completely fails to rank predictions across different inputs (energy pass@K near zero). This is the fundamental failure mode of trajectory ranking for verification.
+10. **Energy co-training helps URM even when energy ranking fails** (R2c). Position-aware energy head produced best eval exact accuracy (6.95%) and best Q-halt pass@K despite near-zero eval Spearman. The multi-task gradient acts as a regularizer.
+11. **More energy head capacity ≠ better generalization** (R2c vs R2b). Position-aware MLP (2K params) had worse eval Spearman (-0.069) than linear head (-0.585). The problem is the training signal (trajectory ranking), not the architecture.
+12. **Mean pooling destroys spatial info but that's not the bottleneck** (R2c). Preserving per-position information didn't help cross-input ranking. The energy head sees backbone features that encode puzzle-specific patterns, not abstract quality.

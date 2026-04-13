@@ -11,9 +11,11 @@ EBT-style refinement is *explicit* energy minimization — a learned scalar ener
 This project implements both approaches in a shared architecture (same backbone, same embeddings, same lm_head) and compares them with matched compute budgets. The goal is not to prove one is universally better, but to characterize when explicit energy adds value over implicit recurrence for discrete reasoning tasks.
 
 ## Current Best Result
-**R1h URM with deep supervision (d=1, h=64, exp=2)**: 5.2% pass@1, 78.9% token accuracy, 3.76% exact accuracy (peak at step 6) at 80K steps on 10×10 grids. 35K params, 8 recurrence steps. Per-step convergence is monotonically increasing: 66.8% → 78.9% token accuracy step 1→6 (12.1% gain). This is the first run with cross-step gradient flow and deep supervision.
+**R2c URM with position-aware energy co-training + dropout (d=1, h=64, exp=2)**: 4.5% pass@1, 79.9% token accuracy, 6.95% exact accuracy (peak at step 6) at 80K steps on 10×10 grids. 37K params, 8 recurrence steps. Q-halt pass@100: 26.0%, pass@1000: 29.2%. Per-step convergence: 67.3% → 79.9% token accuracy step 1→6.
 
-Prior baseline without deep supervision: R1-full URM (h=128, exp=4, depth=2) achieved 25.3% pass@1 / 85.9% token accuracy but with a completely flat per-step curve (0.6% variation). That model was 15× larger (530K params) and converged in 1 step. The R1h model is deliberately small so it needs all 8 steps.
+Prior baselines: R1h (no dropout, no energy): 3.76% eval exact, 5.2% pass@1. R1i (dropout=0.1, no energy): 5.33% eval exact, 5.2% pass@1. The energy co-training acts as multi-task regularization that improves the backbone even though energy ranking itself fails.
+
+Original baseline without deep supervision: R1-full URM (h=128, exp=4, depth=2) achieved 25.3% pass@1 / 85.9% token accuracy but with a completely flat per-step curve (0.6% variation). That model was 15× larger (530K params) and converged in 1 step.
 
 ## Experiment Sequence
 
@@ -24,36 +26,21 @@ R1h confirmed monotonic per-step improvement: 0.13% → 3.76% exact accuracy ste
 
 Key finding: The flat per-step curves in R1a–R1g were caused by `.detach()` between carry-based steps, not by model capacity or problem difficulty. Deep supervision + cross-step gradient flow is the fix. The TRM paper (Jolicoeur-Martineau, 2025) predicted this — they found deep supervision to be the single largest contributor to recurrence benefit.
 
-### Phase 2: Train Energy as Verifier via Trajectory Supervision (R2)
-Co-train the energy head alongside URM using trajectory ranking loss. No MCMC, no second-order gradients — first-order only.
+### Phase 2: Train Energy as Verifier via Trajectory Supervision (R2) — COMPLETE, FAILED
+Co-trained energy head alongside URM using trajectory ranking loss. First-order only.
 
-**Why trajectory supervision, not MCMC-based training:**
-- MCMC improvement > 0 is the hardest thing to achieve and has the most uncertainty.
-- Trajectory ranking is supervised learning — straightforward and stable.
-- Exp 4 proved the concept works when quality spread exists; Exp 4 failed only because the over-parameterized model converged too fast (quality spread collapsed). R1 fixes this prerequisite.
-- Co-training (not sequential) is required because quality spread is highest when the model is still learning. A frozen URM that already converges has no spread to supervise on.
+**Result: Within-trajectory ranking succeeds, cross-input ranking fails.**
+- R2 (no dropout): Train Spearman -1.0, eval Spearman -0.48. Energy pass@K near zero.
+- R2b (dropout backbone): Eval Spearman improved to -0.585. Energy pass@K still near zero.
+- R2c (position-aware MLP): Eval Spearman collapsed to -0.069. Energy pass@K still near zero. BUT: best URM eval exact (6.95%) and Q-halt pass@K (26.0% @100, 29.2% @1000) — energy co-training helps backbone as regularizer.
+- Eval-only ranking comparison (energy drop, best-step energy): all strategies fail equally.
 
-**Trajectory ranking loss design (from Exp 4, refined):**
-- All-pairs weighted margin loss across URM steps: quality_gap * F.relu(E(better) - E(worse) + margin)
-- N steps → N*(N-1)/2 ordered pairs (120 pairs for N=16)
-- Natural anti-collapse: 120+ pairs requiring different energy values makes collapse structurally hard
-- No contrastive loss needed as primary signal (trajectory ranking subsumes it)
+**Root cause:** Trajectory ranking teaches step ordering within a single puzzle's trajectory (step 6 > step 1). This doesn't transfer to ranking predictions across different puzzles. The energy head learns puzzle-specific hidden state patterns, not abstract prediction quality.
 
-**Stabilization tricks from literature:**
-- Log energy-accuracy Spearman correlation from step 0 as early diagnostic (IREM Fig. 5)
-- Separate gradient clipping for energy head (max_norm=1.0) vs backbone (max_norm=5.0)
-- Position-aware energy head (optional, try if correlation is weak after 2K steps)
+**Positive finding:** Energy co-training (especially position-aware R2c) significantly improves the backbone via multi-task regularization, even though the energy ranking signal itself doesn't generalize.
 
-Success criterion: Energy-accuracy correlation remains strong throughout training (not just first few K steps). Active pairs in trajectory ranking loss stay high.
-
-### Phase 2.5: Energy Reranking + Stopping (R2.5) — EVAL ONLY
-No new training. Use the R2-trained energy head to:
-1. Rerank URM pass@K candidates by energy score. Compare to Q-halt ranking.
-2. Use energy convergence as stopping criterion. Compare to Q-halt stopping.
-
-This is a single eval script — score existing URM samples with the energy head.
-
-Success criterion: Energy reranking improves pass@K over Q-halt on at least some K values. If so, this is the first publishable result: "learned energy verification beats learned halting for iterative reasoning."
+### Phase 2.5: Energy Reranking + Stopping (R2.5) — BLOCKED
+Energy reranking cannot beat Q-halt with current training signal. The R2 series gate for R2.5 was not met. R2.5 as originally designed (eval-only comparison) was partially done via `scripts/eval_energy_ranking.py` on R2b — confirmed failure at all K values.
 
 ### Phase 3: MCMC Refinement (R3) — CONDITIONAL ON R2.5
 Now that the energy landscape has validated structure, test whether its gradients can drive refinement.
@@ -78,6 +65,8 @@ Pure EBT (all MCMC, no URM steps) only if R3 shows MCMC refinement works. Use 1 
 - **Over-parameterized model on easy grids**: converges too fast for any refinement to help. Quality spread collapses → trajectory signal dies.
 - **DSM (denoising score matching)**: unnecessary given tractable second-order gradients, trains on wrong distribution
 - **Sequential training (freeze URM, then train energy)**: quality spread only exists during URM learning. Co-training is required.
+- **Trajectory ranking for cross-input energy verification** (R2/R2b/R2c): Within-trajectory ordering doesn't transfer to cross-input ranking. Energy head memorizes puzzle-specific patterns. More capacity (position-aware MLP) makes eval Spearman worse, not better.
+- **Mean pooling energy head** (R2/R2b): destroys spatial information. But position-aware heads (R2c) didn't fix ranking either — the problem is the training signal, not the architecture.
 
 ## Key Architectural Decisions
 - **Energy in hidden space**: E(input_embeddings, hidden) where both are [B, seq_len, hidden_dim]. No soft-embedding bridge.
@@ -87,8 +76,8 @@ Pure EBT (all MCMC, no URM steps) only if R3 shows MCMC refinement works. Use 1 
 - **Co-train energy head with URM**: energy head sees diverse trajectories while URM is still learning.
 
 ## Open Questions
-- Does the energy landscape over hidden states learn useful structure for ARC puzzles when trained via trajectory ranking?
-- Is energy-based reranking better than Q-halt reranking given a well-trained energy function?
-- How many MCMC steps does it take to match one URM recurrence step? (compute efficiency)
-- Does explicit energy help more on harder puzzles within the 10×10 distribution?
-- Can MCMC gradients from a trajectory-trained energy head actually improve predictions, or is the energy function only useful as a verifier?
+- **Can MCMC (R3) force generalizable energy features?** MCMC generates diverse hidden states beyond fixed URM trajectories. This changes the energy head's training distribution. The energy gradient cosine similarity is weakly negative on train (-0.10), suggesting some directional signal exists.
+- **Is cross-puzzle contrastive training needed?** Trajectory ranking only teaches within-puzzle ordering. A loss that compares hidden states *across* different puzzles might force the energy head to learn abstract quality features.
+- **Can energy co-training be improved as a regularizer?** R2c accidentally discovered that energy co-training improves backbone quality (6.95% vs 5.33% eval exact). Can this be amplified — e.g., higher energy_loss_weight, different energy head architectures optimized for regularization rather than ranking?
+- **Is Q-halt fundamentally better than energy for verification?** Q-halt is trained per-sample (binary: is this exact sequence correct?) while energy is trained per-trajectory (ranking: which step is better?). Q-halt's per-sample signal may simply be more informative.
+- **Should the energy head have separate parameters from backbone?** Shared backbone means the energy head sees features optimized for reconstruction, not verification. A dedicated verification network might learn different features.

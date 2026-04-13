@@ -47,7 +47,7 @@ The specific hypotheses under test:
 4. **Complementarity**: Can MCMC refinement improve predictions beyond what URM recurrence achieves when used as a second stage (hybrid architecture)?
 
 ## Hardware Environment
-Single NVIDIA RTX 3090 (24GB VRAM), home lab. All experiments must fit in this envelope. Training budget: 80K steps per experiment (constant LR after 100-step warmup). Second-order gradients (create_graph=True) are tractable at this model scale. Current R1 sweep: depth=1-2, hidden=64-128, expansion=2-4 on 10×10 grids.
+Single NVIDIA RTX 3090 (24GB VRAM), home lab. All experiments must fit in this envelope. Training budget: 80K steps per experiment (constant LR after 100-step warmup). Second-order gradients (create_graph=True) are tractable at this model scale. Current baseline: depth=1, h=64, exp=2, ~35K params, 10×10 grids, ~7 it/s, ~5.8GB VRAM.
 
 ## Success Criteria
 - **Minimum**: Clear characterization of when explicit energy helps vs. when implicit recurrence is sufficient. Energy reranking improves pass@K over Q-halt on matched architecture.
@@ -60,7 +60,7 @@ Single NVIDIA RTX 3090 (24GB VRAM), home lab. All experiments must fit in this e
 - **MCMC in hidden space.** Energy gradients operate on transformer hidden states directly — not soft-embedding space. The energy head and lm_head both expect hidden states; don't introduce distribution mismatches.
 - **Train and test the same way.** MCMC at inference requires create_graph=True during training. No detaching between MCMC steps during training.
 - **Right-size the model so it struggles.** The model must need most of its step budget to converge. If it plateaus in 1-2 steps, refinement has no room to help.
-- **Iterate fast at small scale.** 10×10 grids, ~130K params, 10K steps per experiment.
+- **Iterate fast at small scale.** 10×10 grids, ~35K params, 80K steps per experiment.
 
 ## Researcher Context
 Solo research project by David Colmenares (CMU Robotics PhD, Research Scientist at Meta). Running overnight experiments on a home 3090. The agent should optimize for autonomous reliability over cleverness. When in doubt, run the simpler experiment.
@@ -95,8 +95,8 @@ The codebase has been streamlined to only the active experiment pipeline:
 - **Deleted losses**: `models/dsm_loss.py`, `ACTLossHead` — DSM was unnecessary; contrastive-only caused energy collapse; ACTLossHead was the old carry-based loss head. Note: `models/trajectory_loss.py` was re-created for R2 (trajectory ranking loss for energy head co-training).
 - **Deleted carry infrastructure**: `ModelCarry` dataclass, `ARCBackbone.forward()`, `ARCBackbone.empty_carry()`, `ARCBackbone.reset_carry()`, `ARCModel.forward()`, `ARCModel.initial_carry()`, per-sample halting logic. Replaced by `forward_trajectory()`.
 - **MLP rounding fix**: `_find_multiple` granularity changed from 256 to 8 in `models/layers.py` to allow smooth capacity scaling at small model sizes (at h=64/exp=2, inter=88 instead of 256).
-- **Active configs**: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, plus R1 experiment configs.
-- **Active scripts**: `scripts/train_r2_trajectory.sh` (R2), `scripts/run_r1_rerun.sh` (R1 sweep), plus individual experiment scripts in `scripts/`.
+- **Active configs**: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, R1 experiment configs, R2 series configs (`urm_r2_trajectory.yaml`, `urm_r2b_trajectory_dropout.yaml`, `urm_r2c_pos_mlp.yaml`, `urm_r2d_pos_conv.yaml`, `urm_r2e_pos_attn.yaml`), and `urm_r1i_dropout.yaml`.
+- **Active scripts**: `scripts/train_r2c_cascade.sh`, `scripts/train_r2b_trajectory_dropout.sh`, `scripts/train_r1i_dropout.sh`, `scripts/eval_energy_ranking.py` (eval-only energy ranking comparison), plus individual experiment scripts in `scripts/`.
 
 ### Flat trajectory forward architecture
 `ARCModel.forward_trajectory(batch, N)` is the primary entry point. Runs N recurrence steps in a single call with full gradient flow. `EnergyLossHead.forward(batch)` calls `forward_trajectory` and computes deep supervision loss, per-step metrics, and eval stopping metrics. No carry state, no per-sample halting, no outer loop.
@@ -106,24 +106,38 @@ Three model config fields control behavior:
 - **`stopping`**: `"qhalt"` (learned halt signal) | `"energy"` (energy convergence) — eval-only stopping criterion.
 - **`ranking`**: `"qhalt"` (Q-halt confidence) | `"energy"` (negative energy) — confidence signal for pass@K reranking.
 
-Two loss config fields control energy head co-training (R2):
-- **`energy_loss_weight`**: float (default 0.0). When > 0, adds trajectory ranking loss to total loss. Weight 0.1 used in R2.
+Two model config fields control dropout (R1i+):
+- **`attn_dropout`**: float (default 0.0). Dropout applied inside flash attention. Passed through `ARCBlock` → `Attention` → `flash_attn_func(dropout_p=...)`. Training only.
+- **`mlp_dropout`**: float (default 0.0). Dropout applied after MLP output, before residual add in `ARCBlock`. Standard `nn.Dropout`.
+
+Two model config fields control energy head architecture (R2c+):
+- **`energy_head_type`**: `"linear"` (default, mean_pool→Linear(H,1), 65 params) | `"position_mlp"` (per-position MLP→sum, ~2K params) | `"position_conv_mlp"` (conv+MLP, ~3K params) | `"position_attn_mlp"` (attention+MLP, ~10K params). Implemented via `PositionEnergyHead` class.
+- **`energy_head_hidden`**: int (default 32). Hidden dim for per-position MLP in non-linear energy heads.
+
+Two loss config fields control energy head co-training (R2+):
+- **`energy_loss_weight`**: float (default 0.0). When > 0, adds trajectory ranking loss to total loss. Weight 0.1 used in R2 series.
 - **`ranking_margin`**: float (default 0.1). Margin for all-pairs ranking loss.
 
 Two pretrain config fields control gradient clipping:
 - **`grad_clip_backbone`**: float (default 5.0). Max gradient norm for backbone parameters.
-- **`grad_clip_energy_head`**: float (default 1.0). Max gradient norm for energy head parameters.
-
-Active configs: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, `config/arch/urm_r2_trajectory.yaml`, plus R1 experiment configs (`urm_r1g_d1_h64.yaml`, `urm_r1f_d1.yaml`, `urm_r1h_d1_h128_exp4.yaml`, `urm_r1_15x15.yaml`).
+- **`grad_clip_energy_head`**: float (default 1.0). Max gradient norm for energy head parameters. Name-based filtering (`'energy_head' in param_name`) covers all energy head variants.
 
 ### Per-step metrics
 Per-step metrics are computed inside `EnergyLossHead` for both train and eval: `step_k_accuracy`, `step_k_exact_accuracy`, `step_k_delta_norm`. Eval mode additionally computes stopping metrics: `qhalt_stop_step`, `qhalt_stop_accuracy`, `energy_stop_step`, `energy_stop_accuracy`.
 
 ### Right-size the model for the problem
-Validated config: depth=1, h=64, expansion=2, 8 steps, 10×10 grids, ~35K params. R1h confirmed monotonic per-step accuracy ramp (0.13% → 3.76% exact accuracy step 1→6). Prior R1 experiments showed flat per-step curves because hidden states were detached between steps; deep supervision + cross-step gradient flow fixed this.
+Validated config: depth=1, h=64, expansion=2, 8 steps, 10×10 grids, ~35K params. R1h confirmed monotonic per-step accuracy ramp (0.13% → 3.76% exact accuracy step 1→6). R1i added dropout=0.1 (attn+mlp), improving eval exact to 5.33% and closing train/eval ratio from 6:1 to 3.9:1. R2c (with position-aware energy co-training) achieved the best eval exact at 6.95%. Prior R1 experiments showed flat per-step curves because hidden states were detached between steps; deep supervision + cross-step gradient flow fixed this.
 
-### Energy head training status
-In pure URM mode (R1h config), the energy head receives zero training gradient — `compute_joint_energy` is only called inside `torch.no_grad()` for eval metrics. R2 adds trajectory ranking loss (`energy_loss_weight > 0`) which co-trains the energy head alongside URM via `models/trajectory_loss.py`. R2 result: energy head learns perfect training correlation (Spearman ρ → -1.0) but overfits — eval Spearman only -0.48, energy reranking far worse than Q-halt. The energy head memorizes training-specific hidden state patterns rather than learning abstract quality. Next step: R3 (MCMC) may help by giving the energy head diverse hidden states beyond fixed URM trajectories.
+### Energy head training status — trajectory ranking failed for cross-input ranking
+R2 series (R2/R2b/R2c) comprehensively tested trajectory ranking loss for energy head co-training. Key findings:
+
+1. **Within-trajectory ranking works perfectly.** Train Spearman ρ → -1.0 across all variants. The energy head learns to rank URM steps (step 6 > step 1) within each puzzle.
+2. **Cross-input ranking completely fails.** Energy pass@K is near zero at all practical K values across all variants (linear, position-aware MLP). The energy head cannot rank predictions from different puzzles/augmentations.
+3. **More energy head capacity makes generalization worse.** Position-aware MLP (R2c) had eval Spearman -0.069 vs linear (R2b) -0.585. More capacity → more training overfitting.
+4. **Energy co-training helps the backbone anyway.** R2c produced best eval exact (6.95%) and Q-halt pass@K despite energy ranking failure. The co-training gradient acts as multi-task regularization.
+5. **The problem is the training signal, not the architecture.** Trajectory ranking teaches within-trajectory ordering, which doesn't transfer to cross-input quality discrimination. Alternative eval-time ranking strategies (energy drop, best-step energy) confirmed the features lack discriminative power.
+
+The energy head in its current form is useful as a regularizer (multi-task benefit to backbone) but not as a standalone verifier. Future directions: (a) R3 MCMC may provide diverse hidden states that force generalizable features, (b) contrastive loss across puzzles (not just within-trajectory), or (c) accept that Q-halt is the better verification signal and focus on improving URM directly.
 
 ## Setup
 

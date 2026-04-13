@@ -571,6 +571,24 @@ Question: Does the backbone improvement require gradient flow from the energy he
 | Any | A2 ≈ R2c | A3 ≈ R2c | Extra parameters help (not gradient flow) — very unlikely |
 
 ### Results
+
+#### A1 — Energy loss weight sweep (partial: A1a–A1c complete, A1d running)
+
+| Experiment | elw | Eval Exact | Train Exact | Train/Eval | Spearman | Q-halt pass@1 | Q-halt pass@10 | Q-halt pass@100 |
+|-----------|-----|-----------|------------|-----------|----------|--------------|---------------|----------------|
+| R1i (baseline) | 0.0 | 5.33% | 20.8% | 3.9x | — | — | — | 22.1% |
+| A1a | 0.01 | 6.17% | 20.90% | 3.39x | -0.189 | 5.19% | 22.08% | 26.62% |
+| A1b | 0.05 | 6.06% | 22.46% | 3.71x | -0.087 | 6.49% | 20.13% | 24.68% |
+| R2c (baseline) | 0.1 | 6.95% | 22.9% | 3.3x | -0.069 | — | — | 29.2% |
+| A1c | 0.2 | 6.80% | 21.88% | 3.22x | +0.050 | 5.19% | 20.13% | 25.97% |
+| A1d | 0.5 | TBD | | | | | | |
+
+**Preliminary A1 interpretation:** Broad plateau from 0.01–0.2 (all ~6.0–6.8% eval exact, all above R1i's 5.33%). The sweet spot appears around 0.1–0.2. Even 0.01 weight helps substantially (+16% over R1i), suggesting the backbone benefits from any amount of energy gradient diversity. Energy Spearman degrades with higher weight (-0.189 → +0.050), confirming stronger energy loss doesn't improve cross-input ranking. Train/eval ratio improves across all weights vs R1i (3.9x → 3.2–3.7x).
+
+#### A2 — Random auxiliary head
+TBD
+
+#### A3 — Frozen energy head
 TBD
 
 ---

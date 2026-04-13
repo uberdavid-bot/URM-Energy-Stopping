@@ -581,9 +581,14 @@ Question: Does the backbone improvement require gradient flow from the energy he
 | A1b | 0.05 | 6.06% | 22.46% | 3.71x | -0.087 | 6.49% | 20.13% | 24.68% |
 | R2c (baseline) | 0.1 | 6.95% | 22.9% | 3.3x | -0.069 | — | — | 29.2% |
 | A1c | 0.2 | 6.80% | 21.88% | 3.22x | +0.050 | 5.19% | 20.13% | 25.97% |
-| A1d | 0.5 | TBD | | | | | | |
+| A1d | 0.5 | **4.67%** | 14.84% | 3.17x | +0.213 | 7.79% | 15.58% | 20.13% |
 
-**Preliminary A1 interpretation:** Broad plateau from 0.01–0.2 (all ~6.0–6.8% eval exact, all above R1i's 5.33%). The sweet spot appears around 0.1–0.2. Even 0.01 weight helps substantially (+16% over R1i), suggesting the backbone benefits from any amount of energy gradient diversity. Energy Spearman degrades with higher weight (-0.189 → +0.050), confirming stronger energy loss doesn't improve cross-input ranking. Train/eval ratio improves across all weights vs R1i (3.9x → 3.2–3.7x).
+**A1 interpretation (complete):** The A1 sweep reveals an **inverse-U shape** with a peak around elw=0.1–0.2:
+- **elw ∈ [0.01, 0.2]**: Broad plateau at 6.06–6.95% eval exact, all above R1i's 5.33%. Even 0.01 weight helps substantially (+16% over R1i).
+- **elw = 0.5**: Catastrophic regression to 4.67% — below R1i baseline. Train exact also collapses (14.8% vs 20–23% at lower weights). The energy loss dominates and starves the reconstruction objective.
+- **Energy Spearman flips sign** across the sweep: -0.189 (0.01) → -0.087 (0.05) → -0.069 (0.1, R2c) → +0.050 (0.2) → +0.213 (0.5). Higher weight actively anti-aligns energy with quality on eval, even though train Spearman stays near -1.0 — classic memorization without generalization.
+- **A1d energy pass@100 jumped to 12.3%** (vs ~1–3% elsewhere). Interesting because the backbone is worse overall — suggests extreme weight forces some energy structure at the cost of LM quality.
+- **Conclusion:** R2c's choice of elw=0.1 was near-optimal. The mechanism is genuine regularization with a finite capacity budget, not a direction you can push arbitrarily.
 
 #### A2 — Random auxiliary head
 TBD

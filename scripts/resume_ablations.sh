@@ -1,7 +1,9 @@
 #!/bin/bash
 # Resume ablation experiments after reboot.
-# A1a, A1b, A1c completed. A1d was ~60% done. A2 and A3 not started.
-# Restarts A1d from latest checkpoint, then runs A2 and A3.
+# Completed: A1a, A1b, A1c, A1d.
+# In progress: A2 (~33% done at step_26775, checkpoint saved).
+# Not started: A3.
+# Resumes A2 from latest checkpoint, then runs A3.
 
 set -e
 
@@ -22,29 +24,18 @@ COMMON_ARGS="data_path=data/arc1concept-aug-1000-size-10 \
   grad_clip_energy_head=1.0 \
   +ema=True"
 
-# A1d: resume from checkpoint
-run_name="A1d-elw050-260413"
+# A2: resume from checkpoint (random auxiliary head, shuffled quality)
+run_name="A2-random-260413"
 checkpoint_path="checkpoints/${run_name}"
-echo "=== Resuming A1d: energy_loss_weight=0.5 from checkpoint ==="
-DISABLE_COMPILE=1 torchrun --nproc-per-node 1 pretrain.py \
-  arch=ablation_a1_elw050 \
-  $COMMON_ARGS \
-  +run_name=$run_name \
-  +checkpoint_path=$checkpoint_path \
-  load_checkpoint=latest
-
-# A2: random auxiliary head (shuffled quality)
-run_name="A2-random-$(date +%y%m%d)"
-checkpoint_path="checkpoints/${run_name}"
-mkdir -p $checkpoint_path
-echo "=== Starting A2: random auxiliary head ==="
+echo "=== Resuming A2: random auxiliary head from checkpoint ==="
 DISABLE_COMPILE=1 torchrun --nproc-per-node 1 pretrain.py \
   arch=ablation_a2_random \
   $COMMON_ARGS \
   +run_name=$run_name \
-  +checkpoint_path=$checkpoint_path
+  +checkpoint_path=$checkpoint_path \
+  +load_checkpoint=latest
 
-# A3: frozen energy head (detached hidden)
+# A3: frozen energy head (detached hidden) — fresh run
 run_name="A3-detach-$(date +%y%m%d)"
 checkpoint_path="checkpoints/${run_name}"
 mkdir -p $checkpoint_path

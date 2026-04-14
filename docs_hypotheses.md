@@ -590,11 +590,47 @@ Question: Does the backbone improvement require gradient flow from the energy he
 - **A1d energy pass@100 jumped to 12.3%** (vs ~1–3% elsewhere). Interesting because the backbone is worse overall — suggests extreme weight forces some energy structure at the cost of LM quality.
 - **Conclusion:** R2c's choice of elw=0.1 was near-optimal. The mechanism is genuine regularization with a finite capacity budget, not a direction you can push arbitrarily.
 
-#### A2 — Random auxiliary head
-TBD
+#### A2 — Random auxiliary head (shuffled quality labels, elw=0.1)
 
-#### A3 — Frozen energy head
-TBD
+| Metric | R1i (baseline) | R2c (real labels, elw=0.1) | **A2 (random labels, elw=0.1)** |
+|---|---|---|---|
+| Eval exact | 5.33% | 6.95% | **1.31%** |
+| Train exact | 20.8% | 22.9% | 6.25% |
+| Train/eval ratio | 3.9x | 3.3x | 4.8x |
+| Pass@1 / @10 / @100 / @1000 | — | — / — / — / 29.2% | 0.65% / 11.0% / 14.9% / 15.6% |
+| Train Spearman | — | ~-1.0 | +0.167 |
+| Eval Spearman | — | -0.069 | -0.029 |
+| Energy pass@1 / @5 / @100 / @1000 | — | ~0 / 0 / ~0 / ~0 | 0 / 0 / 0.013 / 0.156 |
+| Q-halt accuracy (eval) | — | — | 98.5% |
+
+**A2 interpretation: catastrophic regression.** Random trajectory labels don't just fail to help — they actively destroy the backbone. Eval exact collapses to 1.31% (75% below R1i), train exact collapses to 6.25%, and pass@1000 drops to 15.6% (below R1i's 22.1%). The random-label gradient injects destructive noise into shared backbone features that the reconstruction objective cannot fully correct over 80K steps. This cleanly rules out the "any auxiliary gradient helps" hypothesis — maps to the `A2 < R2c` row of the interpretation matrix.
+
+#### A3 — Frozen energy head (detached hidden states, elw=0.1)
+
+| Metric | R1i (baseline) | R2c (coupled, elw=0.1) | **A3 (detached, elw=0.1)** |
+|---|---|---|---|
+| Eval exact | 5.33% | 6.95% | **5.67%** |
+| Train exact | 20.8% | 22.9% | 21.3% |
+| Train/eval ratio | 3.9x | 3.3x | 3.76x |
+| Pass@1 / @10 / @100 / @1000 | — / — / — / 22.1% | — / — / — / 29.2% | 5.19% / 17.5% / 24.7% / 28.6% |
+| Train Spearman | — | ~-1.0 | -0.976 |
+| Eval Spearman | — | -0.069 | -0.264 |
+| Energy pass@1 / @5 / @100 / @1000 | — | ~0 / 0 / ~0 / ~0 | 0 / 0 / 0.013 / 0.162 |
+| Q-halt accuracy (eval) | — | — | 92.5% |
+
+**A3 interpretation: eval exact snaps back to R1i baseline.** Detaching hidden states before the energy head eliminates R2c's backbone gain — eval exact drops from 6.95% to 5.67% (within noise of R1i's 5.33%), and train/eval ratio returns to baseline. The energy head still learns its within-trajectory ranking task near-perfectly (train Spearman -0.976) using frozen backbone features, confirming the detach is working as designed. Notable secondary finding: **eval Spearman is actually better when detached** (-0.264 vs R2c's -0.069) — coupling to the backbone drags the energy head toward puzzle-specific features the backbone is learning, hurting cross-input generalization. Still not discriminative enough to recover energy pass@1/5 > 0. Asterisk: pass@1000 stays high at 28.6% (between R1i's 22.1% and R2c's 29.2%), suggesting the detached auxiliary still perturbs Q-halt dynamics slightly — worth caveating as a secondary effect on one seed.
+
+#### Combined A1/A2/A3 conclusion
+
+The three ablations together give a tight mechanistic explanation for R2c's ~1.6pp eval-exact gain over R1i:
+
+| Alternative hypothesis | Ruled out by |
+|---|---|
+| "Wrong weight, just retune" | **A1** — inverse-U peaked at elw=0.1–0.2; elw=0.5 collapses the backbone |
+| "Any auxiliary gradient regularizes" | **A2** — random-label gradient drops eval exact 75% (5.33% → 1.31%) |
+| "Extra parameters / independent head helps" | **A3** — detached head matches R1i, not R2c |
+
+**Conclusion: energy co-training is *structured* multi-task regularization.** It requires both (a) a correctly-ordered trajectory ranking signal and (b) that signal flowing as gradient into the shared backbone at roughly the right strength. The trajectory-ordering task shapes backbone features in a way generic auxiliary losses cannot, but only when the backbone is on the receiving end of that gradient. This is the `A2 < R2c | A3 ≈ R1i | Peaked A1` row of the interpretation matrix — the tightest possible story.
 
 ---
 
@@ -611,3 +647,4 @@ TBD
 10. **Energy co-training helps URM even when energy ranking fails** (R2c). Position-aware energy head produced best eval exact accuracy (6.95%) and best Q-halt pass@K despite near-zero eval Spearman. The multi-task gradient acts as a regularizer.
 11. **More energy head capacity ≠ better generalization** (R2c vs R2b). Position-aware MLP (2K params) had worse eval Spearman (-0.069) than linear head (-0.585). The problem is the training signal (trajectory ranking), not the architecture.
 12. **Mean pooling destroys spatial info but that's not the bottleneck** (R2c). Preserving per-position information didn't help cross-input ranking. The energy head sees backbone features that encode puzzle-specific patterns, not abstract quality.
+13. **Energy co-training is structured multi-task regularization, not generic gradient noise** (A1/A2/A3). R2c's backbone gain requires both a correctly-ordered trajectory signal (A2 random labels → catastrophic regression, 5.33% → 1.31%) and gradient flow into the shared backbone (A3 detach → eval exact snaps back to R1i baseline). A1 additionally shows an inverse-U in loss weight peaked at elw=0.1–0.2 — weight 0.5 collapses reconstruction. Any story that reduces R2c to "extra parameters" or "any auxiliary gradient helps" is ruled out.

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Resume ablation experiments after reboot.
 # Completed: A1a, A1b, A1c, A1d.
-# In progress: A2 (~33% done at step_26775, checkpoint saved).
+# In progress: A2 (~67% done at step_53550, checkpoint saved).
 # Not started: A3.
 # Resumes A2 from latest checkpoint, then runs A3.
 

@@ -661,6 +661,75 @@ Success criterion: Eval exact accuracy > 5.33% (beats R1i).
 - Delta norms (does noise change convergence dynamics?)
 
 ### Results
+
+Both A4 experiments completed at 80K steps, 35,210 params.
+
+| Config | σ noise | Dropout | Eval exact (step 8) | Peak eval exact | Train exact | T/E ratio | Pass@1000 |
+|--------|---------|---------|--------------------|-----------------|-----------  |-----------|-----------|
+| R1h (no reg) | 0 | 0 | 3.76% | — | ~22.6% | 6.0× | — |
+| A4a (noise only) | 0.005 | 0 | 3.34% | 3.96% (step 6) | 22.27% | 6.67× | 23.38% |
+| A4b (noise+dropout) | 0.003 | 0.05 | 4.19% | 4.80% (step 6) | 21.29% | 5.08× | 28.57% |
+| R1i (dropout only) | 0 | 0.1 | 5.33% | — | 20.8% | 3.9× | 22.1% |
+
+Per-step eval exact (monotonic ramp preserved, peak at step 6 for both):
+
+| Step | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|------|---|---|---|---|---|---|---|---|
+| A4a | 0.14% | 0.37% | 1.26% | 3.26% | 3.85% | 3.96% | 3.72% | 3.34% |
+| A4b | 0.08% | 0.36% | 2.28% | 4.49% | 4.75% | 4.80% | 4.61% | 4.19% |
+
+Delta norms essentially unchanged from R1h — noise at σ=0.005 doesn't disrupt convergence dynamics.
+
+**Conclusion: Noise is not a useful backbone regularizer at this scale.** A4a (noise only) performs at or below the unregularized R1h baseline. A4b (noise + reduced dropout) sits between R1h and R1i but below R1i — trading dropout strength for noise is a net loss. Dropout=0.1 remains the standard backbone regularizer.
+
+**Key secondary finding: A4b pass@1000 = 28.6%** — matching A3's 28.6% and approaching R2c's 29.2%, despite worse single-shot eval exact than R1i. This is the second time (after A3) that adding stochasticity to hidden states improves candidate diversity under Q-halt reranking without improving the mode. Pass@K and single-shot accuracy respond to different regularization mechanisms — a useful finding for the paper.
+
+**Important distinction: A4 does NOT test ranking noise.** A4 asked "does noise in the recurrence loop regularize the backbone?" — answer: no, dropout is better. The ranking noise idea (R2g) asks a different question: "does noising hidden states before the energy head scores them break the step-index shortcut in trajectory ranking?" That's about the energy head's training signal, not backbone regularization. The energy head never existed in A4. The step-index shortcut (confirmed by A3's better eval Spearman when decoupled: -0.264 vs R2c's -0.069) is a property of how the ranking loss interacts with deterministic trajectories. Ranking noise remains untested and its motivation is fully intact.
+
+The Langevin-dynamics analogy for backbone regularization is dead. But noise injection into the energy head's view of hidden states (ranking noise) is a separate mechanism targeting a different failure mode and should be tested after scaling experiments confirm the capacity story.
+
+---
+
+### Experiment R1-h96 — Scaled baseline (h=96, depth=1, dropout=0.1)
+Date: 2026-04-14
+Script: `scripts/train_h96_scale.sh`
+Config: `config/arch/urm_r1_h96_baseline.yaml` — d=1, h=96, 4 heads (head_dim=24, flash-attn verified), exp=2, 8 steps, attn_dropout=0.1, mlp_dropout=0.1. No energy head. **~79.6K params (2.3× R1i's 35K)**. VRAM at batch=512 smoke-tested at 3.64 GB — well within budget.
+
+**Motivation:** A1d showed the energy head can learn cross-input ranking at h=64 but only by sacrificing reconstruction quality (eval exact 4.67% vs 6.95% at elw=0.1). The 35K-param model can't do both tasks. Scaling to h=96 (~80K params) tests whether additional capacity resolves this trade-off.
+
+**Critical gate:** Must show multi-step convergence (monotonic per-step accuracy ramp, >5% variation step 1→6). R1f showed h=128/d=1 (without deep supervision) one-step converged. h=96/d=1 with deep supervision is untested — if it one-step converges, R2c-h96 is pointless (no trajectory to rank) and we'll need h=80 or more steps or reduced expansion.
+
+Hypothesis: h=96 with deep supervision maintains multi-step convergence (like h=64) while achieving higher absolute accuracy due to increased capacity. Expected eval exact > 7% (scaling from R1i's 5.33%).
+
+Key measurements: per-step exact accuracy curve, eval exact (peak and step 8), pass@K, VRAM usage, throughput (it/s).
+
+### Result
+TBD
+
+---
+
+### Experiment R2c-h96 — Trajectory ranking at h=96 (position-aware energy head)
+Date: 2026-04-14
+Script: `scripts/train_h96_scale.sh` (second experiment)
+Config: `config/arch/urm_r2c_h96_pos_mlp.yaml` — same backbone as R1-h96 + energy_loss_weight=0.1, position_mlp energy head, energy_head_hidden=32.
+
+**Contingent on R1-h96 showing multi-step convergence.**
+
+Hypothesis: At 2× capacity, the model can serve both reconstruction and energy ranking without the trade-off seen at h=64. Energy pass@K should be non-trivial (>5% at pass@100) while eval exact matches or exceeds R2c's 6.95%.
+
+**Key comparison:**
+- vs R2c (h=64): Does energy ranking improve with more capacity?
+- vs A1d (h=64, elw=0.5): Does scaling resolve the capacity trade-off that A1d exposed?
+
+Success criteria (ordered by importance):
+1. Eval exact ≥ R2c's 6.95% (capacity helps reconstruction)
+2. Energy pass@100 > 5% (first practical cross-input energy ranking)
+3. Eval Spearman < -0.3 (energy head generalizes better than R2c's -0.069)
+4. Per-step monotonic ramp preserved
+
+Key diagnostics: eval exact, energy pass@K, eval Spearman, train Spearman, backbone eval vs R1-h96 (isolate energy co-training effect at new scale).
+
+### Result
 TBD
 
 ---

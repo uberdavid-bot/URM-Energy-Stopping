@@ -634,6 +634,37 @@ The three ablations together give a tight mechanistic explanation for R2c's ~1.6
 
 ---
 
+### Experiment A4 — Recurrence noise as backbone regularizer
+
+Dropout=0.1 improved eval exact from 3.76% to 5.33% (R1i). This tests whether additive Gaussian noise in the recurrence loop is an alternative or complementary mechanism.
+
+**Motivation:** Dropout zeros random features; noise perturbs all features continuously. Noise also has a connection to Langevin dynamics — if the recurrent process is implicitly minimizing an energy landscape, noise injection regularizes that landscape. This may have downstream benefits for energy head training if we later add trajectory ranking.
+
+#### A4a — Recurrence noise only (no dropout)
+Config: `ablation_a4a_noise.yaml`. σ=0.005, attn_dropout=0, mlp_dropout=0. No energy head.
+Hypothesis: Recurrence noise provides regularization comparable to dropout by preventing the model from relying on precise hidden state features that don't generalize.
+Success criterion: Eval exact accuracy > 4.5% (within 85% of R1i's 5.33%).
+
+#### A4b — Recurrence noise + dropout (reduced strength)
+Config: `ablation_a4b_noise_dropout.yaml`. σ=0.003, attn_dropout=0.05, mlp_dropout=0.05. No energy head.
+Hypothesis: Noise and dropout are complementary — dropout regularizes individual features, noise regularizes the trajectory dynamics. Combined at reduced individual strength, they should outperform either alone.
+Success criterion: Eval exact accuracy > 5.33% (beats R1i).
+
+#### Hyperparameter rationale
+- **A4a σ=0.005**: R1h delta norms range from 0.008 (step 2) to 0.0009 (step 8), averaging ~0.004 at mid-trajectory. σ=0.005 means noise magnitude is comparable to one refinement step — enough to regularize without overwhelming the signal.
+- **A4b combined**: Both mechanisms reduced to half-ish of full strength. dropout=0.05 (half of R1i's 0.1), noise=0.003 (60% of A4a's 0.005). Splits the regularization budget between two complementary mechanisms.
+
+#### Key metrics
+- Eval exact accuracy (peak step and step 8)
+- Train/eval ratio
+- Per-step accuracy curve shape (is the monotonic ramp preserved?)
+- Delta norms (does noise change convergence dynamics?)
+
+### Results
+TBD
+
+---
+
 ## Lessons Carried Forward
 1. **Dual reconstruction loss is mandatory** for MCMC training (Exp 3a).
 2. **Contrastive loss alone causes energy collapse** (Exp 1). Use trajectory ranking as primary energy training signal (first-order, R2). MCMC reconstruction provides second-order signal in R3.

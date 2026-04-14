@@ -22,6 +22,8 @@ class ARCModelConfig(BaseModel):
     pos_encodings: str
     attn_dropout: float = 0.0
     mlp_dropout: float = 0.0
+    # Additive Gaussian noise stddev applied to hidden states after each URM recurrence pass (training only)
+    recurrence_noise: float = 0.0
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
     # Total recurrence steps before halting
@@ -294,6 +296,10 @@ class ARCModel(nn.Module):
                 hidden = hidden + input_embeddings
                 for layer in self.inner.layers:
                     hidden = layer(hidden_states=hidden, **seq_info)
+
+                # Recurrence noise: additive Gaussian on hidden state (training only)
+                if self.config.recurrence_noise > 0 and self.training:
+                    hidden = hidden + self.config.recurrence_noise * torch.randn_like(hidden)
             else:
                 # EBT update: energy gradient step
                 hidden = self._mcmc_step(

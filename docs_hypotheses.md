@@ -693,7 +693,7 @@ The Langevin-dynamics analogy for backbone regularization is dead. But noise inj
 ### Experiment R1-h96 — Scaled baseline (h=96, depth=1, dropout=0.1)
 Date: 2026-04-14
 Script: `scripts/train_h96_scale.sh`
-Config: `config/arch/urm_r1_h96_baseline.yaml` — d=1, h=96, 4 heads (head_dim=24, flash-attn verified), exp=2, 8 steps, attn_dropout=0.1, mlp_dropout=0.1. No energy head. **~79.6K params (2.3× R1i's 35K)**. VRAM at batch=512 smoke-tested at 3.64 GB — well within budget.
+Config: `config/arch/urm_r1_h96_baseline.yaml` — d=1, h=96, 4 heads (head_dim=24, flash-attn verified), exp=2, 8 steps, attn_dropout=0.1, mlp_dropout=0.1. No energy head. **~76.6K params (2.2× R1i's 35K)**. VRAM at batch=512 smoke-tested at 3.64 GB — well within budget.
 
 **Motivation:** A1d showed the energy head can learn cross-input ranking at h=64 but only by sacrificing reconstruction quality (eval exact 4.67% vs 6.95% at elw=0.1). The 35K-param model can't do both tasks. Scaling to h=96 (~80K params) tests whether additional capacity resolves this trade-off.
 
@@ -704,7 +704,22 @@ Hypothesis: h=96 with deep supervision maintains multi-step convergence (like h=
 Key measurements: per-step exact accuracy curve, eval exact (peak and step 8), pass@K, VRAM usage, throughput (it/s).
 
 ### Result
-TBD
+**Massive scaling win — eval exact 15.59%, pass@1000 40.91%.** 76K params. Runtime: 1h 42m.
+
+| Step | Token Acc | Exact Acc | Delta Norm |
+|------|-----------|-----------|------------|
+| 1 | 67.58% | 0.24% | — |
+| 2 | 78.89% | 5.44% | 0.0105 |
+| 3 | 82.43% | 11.60% | 0.0055 |
+| 4 | 83.47% | 13.97% | 0.0034 |
+| 5 | 83.79% | 15.22% | 0.0023 |
+| 6 | 83.83% | 16.08% | 0.0016 |
+| 7 | 83.75% | **16.09%** | 0.0012 |
+| 8 | 83.61% | 15.59% | 0.00098 |
+
+Multi-step convergence confirmed: +15.85pp exact accuracy step 1→7. Train exact: 36.33%. Train/eval ratio: 2.33× (best yet — overfitting decreased at larger scale). pass@K (Q-halt): 20.78% @1, 31.17% @10, 34.42% @100, 40.91% @1000.
+
+**Conclusion:** h=96 is the validated operating point. 2.2× params (35K → 76K) → 2.9× eval exact (5.33% → 15.59%). The capacity ceiling at h=64 was real and severe. All future experiments should use h=96 as the baseline.
 
 ---
 
@@ -728,6 +743,79 @@ Success criteria (ordered by importance):
 4. Per-step monotonic ramp preserved
 
 Key diagnostics: eval exact, energy pass@K, eval Spearman, train Spearman, backbone eval vs R1-h96 (isolate energy co-training effect at new scale).
+
+### Result
+**Energy co-training HURTS at h=96 — eval exact 11.78% vs R1-h96's 15.59%.** 80K params. Runtime: 4h 39m.
+
+| Step | Exact Acc |
+|------|-----------|
+| 1 | 0.12% |
+| 2 | 4.73% |
+| 3 | 10.47% |
+| 4 | 11.93% |
+| 5 | **12.50%** |
+| 6 | 12.42% |
+| 7 | 12.20% |
+| 8 | 11.78% |
+
+Train exact: 33.98%. Train/eval ratio: 2.88×. pass@K (Q-halt): 18.18% @1, 29.87% @10, 34.42% @100, 35.71% @1000. Energy pass@100: 4.55% (vs R2c h=64 ~1.3%). Eval Spearman: +0.007 (statistically independent of quality, worse than R2c's -0.069).
+
+**Inversion finding:** At h=64, R2c beat R1i by +1.6pp. At h=96, R2c-h96 lags R1-h96 by -3.8pp. The trajectory ranking benefit was a capacity-starvation effect — the auxiliary loss provided gradient regularization that helped an underpowered backbone, but at h=96 where the backbone has sufficient capacity, the energy objective actively competes for representational budget. Train exact ALSO drops (36.33% → 33.98%), confirming the energy head isn't trading train for eval — it's consuming capacity that would otherwise serve reconstruction. This is NOT a universal multi-task regularization mechanism; it was a crutch for a capacity-starved model.
+
+**Energy head still fails:** Eval Spearman moved from -0.069 (h=64) to +0.007 (h=96). More capacity gave the energy head more parameters to overfit the within-trajectory ranking without transferring to cross-input quality. The step-index shortcut is robust to scale.
+
+**Implication:** elw=0.1 at h=96 is in the "starving reconstruction" regime (like elw=0.3-0.5 at h=64). The trajectory ranking training signal itself needs to change — either ranking noise to break the shortcut, or cross-trajectory pairs where the shortcut doesn't apply.
+
+---
+
+### Experiment R2g-h96 — Ranking noise at h=96
+Date: 2026-04-14
+Script: `scripts/train_r2g_r2i_h96.sh`
+Config: `config/arch/urm_r2g_h96_ranking_noise.yaml` — h=96 backbone + trajectory ranking with `ranking_noise_sigma=0.01`, `energy_loss_weight=0.05`, position_mlp energy head.
+
+**Motivation:** The step-index shortcut (confirmed by A3, unchanged at h=96) lets the energy head learn "step 6 > step 1" without inspecting hidden state quality. Ranking noise adds Gaussian noise to hidden states before the energy head scores them, corrupting the precise features that encode step identity while preserving coarse quality differences. The energy head is forced to learn noise-invariant quality features.
+
+**Key design choices:**
+- σ ~ Uniform(0, 0.01) per step (fresh sample each step): average σ=0.005, comparable to mid-trajectory delta norms (0.003-0.01 at h=96).
+- Noise only affects energy head inputs — reconstruction loss, Q-halt loss, and quality labels all use the clean hidden states.
+- elw=0.05 (half of R2c-h96's 0.1) to limit reconstruction impact in a regime where any energy weight already hurts.
+- Quality labels computed from the clean forward pass — noise doesn't change the ranking targets, only the features used to predict them.
+
+Hypothesis: Ranking noise breaks the step-index shortcut, forcing the energy head to learn features that generalize across inputs. Eval Spearman should improve significantly from R2c-h96's +0.007.
+
+Success criteria:
+1. Eval exact ≥ 14% (backbone not significantly hurt)
+2. Eval Spearman < -0.2 (energy head generalizes)
+3. Energy pass@100 > 10% (first practical cross-input energy ranking)
+
+### Result
+TBD
+
+---
+
+### Experiment R2i-h96 — Cross-trajectory ranking at h=96
+Date: 2026-04-14
+Script: `scripts/train_r2g_r2i_h96.sh` (second experiment)
+Config: `config/arch/urm_r2i_h96_cross_traj.yaml` — h=96 backbone + cross-trajectory ranking (`cross_trajectory_k=2`), `energy_loss_weight=0.05`, position_mlp energy head.
+
+**Motivation:** Cross-trajectory ranking creates pairs where step index is held constant by construction. For the same recurrence step t, compare hidden state quality across two different augmentations of the same puzzle. The energy head literally cannot use step depth as a shortcut because both items in every pair share the same step.
+
+**Pipeline finding that makes this cheap:** `puzzle_dataset._sample_batch` already fills each training batch with augmentations of a single puzzle (batch=512, num_aug=1000, append_size=512 on the first iteration, loop exits). So intra-batch same-step pairs are naturally same-puzzle cross-augmentation pairs. No dataloader change, no extra forward passes — cross-trajectory pairs reuse the per-example energies already computed for the within-trajectory ranking loss. VRAM cost is negligible.
+
+**Implementation:** For each step t, randomly permute batch indices, pair `perm[:B/2]` with `perm[B/2:B]`, compute signed-gap margin loss across the B/2 pairs. Combined additively with the within-trajectory ranking term.
+
+**Why this is orthogonal to ranking noise:** Ranking noise corrupts shortcut features but keeps the same within-trajectory pairs (step i vs step j). Cross-trajectory creates entirely new same-step pairs where the shortcut doesn't apply. If hidden states genuinely lack quality-discriminative features at matched depth, both fail. But A3's eval Spearman of -0.264 with the detached head suggests discriminative features DO exist in natural hidden states — the coupled head just doesn't learn to use them because the shortcut is easier.
+
+**Key design choices:**
+- K=2 interpreted structurally: same-step pairs are created within the existing batch (all augmentations of one puzzle). No change to the dataloader.
+- Same-step pairs added to (not replacing) within-trajectory pairs.
+- elw=0.05 to limit reconstruction impact.
+- Quality measured against each augmentation's own ground truth.
+- New metric `cross_traj_active_pairs` logged so we can verify pairs > 0 in the first training step.
+
+Hypothesis: Cross-trajectory pairs force the energy head to learn quality features that transfer across inputs, since the step-index shortcut is structurally eliminated.
+
+Success criteria: same as R2g-h96.
 
 ### Result
 TBD

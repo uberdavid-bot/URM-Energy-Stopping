@@ -42,6 +42,10 @@ class ARCModelConfig(BaseModel):
     mcmc_step_size: float = 0.01
     # Hybrid: number of URM steps before switching to MCMC (must be < loops)
     mcmc_start_step: int = 0
+    # Langevin noise scale added to hidden after each MCMC update (training only)
+    mcmc_langevin_noise: float = 0.0
+    # If True, sample step size uniformly from [mcmc_step_size/3, mcmc_step_size] per training step
+    mcmc_random_step_size: bool = False
     # Energy head architecture: "linear" | "position_mlp" | "position_conv_mlp" | "position_attn_mlp"
     energy_head_type: str = "linear"
     energy_head_hidden: int = 32
@@ -246,17 +250,28 @@ class ARCModel(nn.Module):
         """Single MCMC gradient step in hidden space.
 
         Training: create_graph=True (second-order gradients flow into energy head).
-        Inference: detach to save memory.
+        Optional Langevin noise + randomized step size during training (EBT-style
+        landscape regularization).
+        Inference: detach to save memory, no noise, deterministic step size.
         """
         P = self.inner.puzzle_emb_len if full_hidden else 0
 
         if self.training:
+            if self.config.mcmc_random_step_size:
+                r = float(torch.rand(1).item())  # [0, 1)
+                effective_step_size = step_size * (1.0 / 3.0 + (2.0 / 3.0) * r)
+            else:
+                effective_step_size = step_size
+
             if not hidden.requires_grad:
                 hidden = hidden.requires_grad_(True)
             energy = self.compute_joint_energy(input_embeddings, hidden[:, P:])
             grad = torch.autograd.grad(energy.sum(), hidden, create_graph=True)[0]
             grad = grad / grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-            hidden = hidden - step_size * grad
+            hidden = hidden - effective_step_size * grad
+
+            if self.config.mcmc_langevin_noise > 0:
+                hidden = hidden + self.config.mcmc_langevin_noise * torch.randn_like(hidden)
         else:
             hidden = hidden.detach().requires_grad_(True)
             with torch.enable_grad():

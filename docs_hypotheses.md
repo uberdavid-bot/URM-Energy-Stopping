@@ -921,6 +921,46 @@ At step_size=1.0 K=4 normalized, Q-halt's sigmoid moves from ~0.023 to ~0.996 �
 
 ---
 
+### Experiment R3 — Hybrid URM + MCMC training at h=96
+Date: 2026-04-15
+Script: `scripts/train_r3_hybrid_h96.sh`
+Config: `config/arch/urm_r3_hybrid_h96.yaml` — depth=1, h=96, 4 heads, expansion=2, 8 total steps (5 URM + 3 MCMC), dropout=0.1. Linear energy head (mean pool → Linear(96, 1)). MCMC step_size=0.01 (normalized, randomized per training step in [step/3, step]). Langevin noise σ=0.003 during training only. No trajectory ranking loss (`energy_loss_weight=0.0`) — energy head trained purely through MCMC reconstruction loss via `create_graph=True`. Separate gradient clipping: backbone=5.0, energy_head=1.0.
+
+**This is the core experiment of the project.** Every prior energy-head failure had a specific, diagnosable cause:
+1. Contrastive collapse (Exp 1) → solved by trajectory ranking / deep supervision.
+2. Step-index shortcut (R2c/R2c-h96) → not applicable, no trajectory ranking.
+3. Train/eval distribution mismatch (R2i-h96) → not applicable, no cross-trajectory ranking.
+4. Position-0 gradient bottleneck (R3-diag) → solved by full-sequence `compute_joint_energy` (mean pool over all positions, not the puzzle-emb token alone).
+5. Manifold mismatch between Q-halt readout and lm_head decoding (R3-diag) → solved by `create_graph=True` training on MCMC-moved states, which forces the energy landscape to be co-adapted to its own gradient direction.
+
+R3 addresses all five by construction. The energy head learns through its own optimization process: reconstruction loss on MCMC-refined predictions flows back through `create_graph` into the energy head, forcing it to learn a landscape where gradient descent produces better hidden states.
+
+**Training signal flow:**
+- Steps 1–5 (URM): standard deep supervision (reconstruction + Q-halt BCE, weighted by `(t+1)/8`). First-order gradients only. These steps are protected from MCMC interference.
+- Steps 6–8 (MCMC): hidden states are refined by energy gradient descent with `create_graph=True`. Deep supervision applies reconstruction loss at each MCMC step. This reconstruction loss has a computational graph that includes the energy head — backpropagation through this graph trains the energy head to produce a landscape where descent improves predictions.
+- Dual loss is automatic: URM steps get their own reconstruction loss (protecting URM learning), and MCMC steps get separate reconstruction loss (training the energy landscape). No explicit dual loss term needed.
+
+**Implementation notes:** `_mcmc_step` now takes `mcmc_langevin_noise` and `mcmc_random_step_size` from config. Training path: `effective_step = step * Uniform(1/3, 1)` when random, then `hidden = hidden - effective_step * normalized(grad) + langevin_noise * randn`. Eval path: deterministic step, no noise, detach between steps to save memory. `EnergyLossHead` gained hybrid-only metrics: `mcmc_improvement` (Δ exact accuracy from URM endpoint to final MCMC step), `mcmc_urm_end_energy`, `energy_decrease` (final energy − URM endpoint energy), and per-MCMC-step energy `mcmc_step_{k}_energy`.
+
+**VRAM safety:** 5-batch smoke test at batch 512 completed one train-eval cycle without OOM. Full-run estimate: ~8–12 GB based on create_graph overhead. Fallback config (batch 256, epochs 63180, eval_interval 4212) documented in the training script header if OOM appears mid-run.
+
+Hypothesis: The energy head, trained through MCMC optimization (`create_graph=True`), learns a landscape where gradient descent in hidden space improves predictions beyond what URM recurrence achieves at matched total steps.
+
+Expected outcome: `mcmc_improvement > 0` — accuracy after 3 MCMC steps exceeds accuracy at URM step 5. Per-MCMC-step energy should decrease monotonically (landscape is being optimized). URM steps 1–5 should not degrade vs R1-h96 (dual loss protection).
+
+Key comparison: R3 per-step accuracy at steps 6–8 vs R1-h96 per-step accuracy at steps 6–8. R1-h96 peaks at step 7 (16.09%) and slightly degrades at step 8 (15.59%). If R3's MCMC steps maintain or improve beyond step 6, explicit refinement helps.
+
+Success criterion: `mcmc_improvement > 0` AND eval exact at step 8 ≥ R1-h96's step 7 peak (16.09%).
+Partial success: `mcmc_improvement > 0` but eval exact < 16.09% — MCMC helps but not enough to beat best URM step.
+Failure: `mcmc_improvement ≤ 0` — MCMC degrades predictions, energy landscape is not useful for optimization.
+
+Risk: Second-order gradients may cause training instability (gradient explosion through energy head). Monitored via separate gradient clipping and energy value tracking. MCMC may also be a worse version of additional URM steps — same hidden space but without attention's inductive bias.
+
+### Result
+TBD
+
+---
+
 ## Lessons Carried Forward
 1. **Dual reconstruction loss is mandatory** for MCMC training (Exp 3a).
 2. **Contrastive loss alone causes energy collapse** (Exp 1). Use trajectory ranking as primary energy training signal (first-order, R2). MCMC reconstruction provides second-order signal in R3.

@@ -142,10 +142,12 @@ class EnergyLossHead(nn.Module):
             metrics["current_energy"] = final_energy.mean().detach()
 
             # --- Per-step metrics (all steps) ---
+            per_step_seq_correct = []
             for t in range(N):
                 step_preds_t = torch.argmax(all_logits[t], dim=-1)
                 step_tok_correct = mask & (step_preds_t == labels)
                 step_seq_correct = step_tok_correct.sum(-1) == loss_counts
+                per_step_seq_correct.append(step_seq_correct)
 
                 metrics[f"step_{t+1}_accuracy"] = torch.where(
                     valid, (step_tok_correct.to(torch.float32) / loss_divisor).sum(-1), 0
@@ -155,6 +157,32 @@ class EnergyLossHead(nn.Module):
                 if t > 0:
                     delta = (all_hidden[t] - all_hidden[t - 1]).norm(dim=-1).mean()
                     metrics[f"step_{t+1}_delta_norm"] = delta
+
+            # --- Hybrid MCMC metrics: improvement over URM endpoint + per-MCMC-step energy ---
+            if self.model.config.refinement == "hybrid":
+                mcmc_start = self.model.config.mcmc_start_step
+                if 0 < mcmc_start < N:
+                    urm_end_correct = per_step_seq_correct[mcmc_start - 1]
+                    final_correct_mcmc = per_step_seq_correct[-1]
+                    # Net change in correct count (scaled by count so /count gives rate delta)
+                    mcmc_improvement = (
+                        (valid & final_correct_mcmc).to(torch.int64)
+                        - (valid & urm_end_correct).to(torch.int64)
+                    ).sum()
+                    metrics["mcmc_improvement"] = mcmc_improvement
+
+                    # Energy at URM endpoint and each MCMC step
+                    urm_end_energy = self.model.compute_joint_energy(
+                        input_embeddings, all_hidden[mcmc_start - 1][:, P:].detach()
+                    )
+                    # Per-MCMC-step energy (summed so /count gives mean)
+                    for t in range(mcmc_start, N):
+                        step_e = self.model.compute_joint_energy(
+                            input_embeddings, all_hidden[t][:, P:].detach()
+                        )
+                        metrics[f"mcmc_step_{t+1}_energy"] = step_e.sum().detach()
+                    metrics["mcmc_urm_end_energy"] = urm_end_energy.sum().detach()
+                    metrics["energy_decrease"] = (final_energy - urm_end_energy).sum().detach()
 
             # --- Eval-only stopping metrics ---
             if not self.training:

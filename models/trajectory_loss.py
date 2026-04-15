@@ -7,18 +7,25 @@ IGNORE_LABEL_ID = -100
 
 def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddings, margin=0.1,
                             shuffle_quality=False, detach_hidden=False,
-                            ranking_noise_sigma=0.0, cross_trajectory_k=1,
+                            ranking_noise_sigma=0.0, cross_trajectory=False,
                             training=True):
-    """All-pairs weighted margin ranking loss across URM trajectory steps.
+    """Margin ranking loss over URM trajectory steps.
 
-    Within-trajectory: for each pair (i, j) where step i has higher batch-mean
-    quality than step j, E(h_i) should be < E(h_j).
+    Two ranking terms:
+      1. Within-trajectory (default): for each pair of steps (i, j) where step i
+         has higher batch-mean quality than step j, require E(mean h_i) < E(mean h_j).
+         This learns temporal ordering of the refinement trajectory.
+      2. Cross-trajectory (optional, `cross_trajectory=True`): at each step t, take
+         the [B, B] all-pairs ranking over per-example quality and per-example
+         energy. Because `_sample_batch` fills every training batch with
+         augmentations of a single puzzle, intra-batch pairs at the same step are
+         naturally same-puzzle cross-augmentation pairs — step index is held
+         constant by construction, so the energy head cannot use step depth as a
+         shortcut for these pairs.
 
-    Cross-trajectory (cross_trajectory_k > 1): for each recurrence step t, sample
-    same-step pairs across augmentations in the batch. Because _sample_batch fills
-    each training batch with augmentations of one puzzle, intra-batch pairs are
-    naturally same-puzzle cross-augmentation pairs. Step index is held constant
-    within each pair, so the energy head cannot use step depth as a shortcut.
+    Both terms are mean-normalized by their active-pair count and summed so that
+    `energy_loss_weight` controls the combined strength without one term drowning
+    out the other.
 
     Args:
         model: ARCModel (has compute_joint_energy and inner.puzzle_emb_len)
@@ -27,21 +34,20 @@ def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddi
         labels: [B, seq_len] with IGNORE_LABEL_ID=-100 for padding
         input_embeddings: [B, seq_len + P, hidden_dim]
         margin: margin for ranking loss
-        shuffle_quality: A2 ablation — randomly permute quality scores
+        shuffle_quality: A2 ablation — randomly permute batch-mean quality ordering
         detach_hidden: A3 ablation — detach hidden/input_emb before energy head
         ranking_noise_sigma: R2g — max Gaussian σ applied to hidden states before
             the energy head scores them (training only). sigma is sampled per-step
             uniformly from [0, ranking_noise_sigma]. Reconstruction and Q-halt are
             unaffected — noise lives only in the ranking branch.
-        cross_trajectory_k: R2i — enables cross-trajectory same-step pairs when > 1.
-            Does not change the number of forward passes; reuses per-example energies.
+        cross_trajectory: R2i — enable same-step cross-trajectory ranking pairs.
         training: controls ranking_noise_sigma (noise only applied in training).
 
     Returns:
-        loss: scalar trajectory ranking loss
+        loss: scalar trajectory ranking loss (mean-normalized)
         metrics: dict with trajectory_quality_first, trajectory_quality_last,
-                 active_pairs, cross_traj_active_pairs, energy_accuracy_spearman,
-                 total_pairs, energy_gradient_cosine_sim
+                 active_pairs, cross_traj_active_pairs, cross_traj_quality_std,
+                 energy_accuracy_spearman, total_pairs, energy_gradient_cosine_sim
     """
     N = len(all_hidden)
     P = model.inner.puzzle_emb_len
@@ -52,7 +58,7 @@ def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddi
     loss_counts = mask.sum(-1)  # [B]
 
     # --- Per-example per-step quality (detached labels, not differentiable) ---
-    per_example_quality = []
+    per_example_quality = []  # list of [B] tensors
     with torch.no_grad():
         for t in range(N):
             preds = all_logits[t].detach().argmax(dim=-1)
@@ -92,56 +98,67 @@ def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddi
     energies_tensor = torch.stack(energies_avg)  # [N]
 
     # --- Within-trajectory ranking (step i vs step j on batch-mean quality/energy) ---
-    total_loss = torch.tensor(0.0, device=device)
-    active_pairs = 0
+    within_active = 0
+    within_loss_sum = torch.tensor(0.0, device=device)
     total_pairs = N * (N - 1) // 2
 
     for i in range(N):
         for j in range(i + 1, N):
             if batch_quality[i] != batch_quality[j]:
-                active_pairs += 1
+                within_active += 1
                 if batch_quality[i] > batch_quality[j]:
                     gap = batch_quality[i] - batch_quality[j]
                     pair_loss = gap * F.relu(energies_tensor[i] - energies_tensor[j] + margin)
                 else:
                     gap = batch_quality[j] - batch_quality[i]
                     pair_loss = gap * F.relu(energies_tensor[j] - energies_tensor[i] + margin)
-                total_loss = total_loss + pair_loss
+                within_loss_sum = within_loss_sum + pair_loss
 
-    # --- Cross-trajectory ranking: same-step pairs across augmentations ---
-    # Pairs use random stride halving (B/2 pairs per step). Because the training
-    # dataloader packs each batch with augmentations of a single puzzle, these are
-    # naturally same-puzzle cross-augmentation pairs with matched step index.
+    if within_active > 0:
+        within_loss = within_loss_sum / within_active
+    else:
+        within_loss = within_loss_sum  # 0.0 tensor
+
+    total_loss = within_loss
+
+    # --- Cross-trajectory ranking: [B, B] all-pairs at each step ---
     cross_traj_active_pairs = 0
-    if cross_trajectory_k > 1 and B > 1:
-        half = B // 2
+    cross_traj_quality_std_sum = 0.0
+    if cross_trajectory and B > 1:
+        cross_loss_sum = torch.tensor(0.0, device=device)
+        active_step_count = 0
         for t in range(N):
             q = per_example_quality[t]  # [B]
             e = per_example_energies[t]  # [B]
 
-            perm = torch.randperm(B, device=device)
-            idx_a = perm[:half]
-            idx_b = perm[half: 2 * half]
+            cross_traj_quality_std_sum += q.std().item() if B > 1 else 0.0
 
-            q_a = q[idx_a]
-            q_b = q[idx_b]
-            e_a = e[idx_a]
-            e_b = e[idx_b]
+            # quality_diff[i,j] = q_i - q_j; positive -> i is the better prediction
+            quality_diff = q.unsqueeze(1) - q.unsqueeze(0)           # [B, B]
+            energy_diff = e.unsqueeze(1) - e.unsqueeze(0)            # [B, B]
 
-            q_gap = q_a - q_b  # positive → a is better, negative → b is better
-            pair_mask = q_gap != 0
-            if not pair_mask.any():
+            # Only pairs where i strictly beats j (upper triangle equivalent via asymmetry).
+            valid = quality_diff > 0                                 # [B, B]
+            n_valid = int(valid.sum().item())
+            if n_valid == 0:
                 continue
 
-            # Ranking loss: if q_a > q_b, want e_a < e_b (violation: e_a - e_b + margin > 0)
-            # Combine both directions via signed gap.
-            violation = F.relu(torch.sign(q_gap) * (e_a - e_b) + margin)
-            pair_losses = q_gap.abs() * violation
+            # When q_i > q_j, we want E_i < E_j, i.e. penalize relu(E_i - E_j + margin).
+            # quality_diff acts as the gap weight so small gaps contribute little.
+            pair_loss = quality_diff * F.relu(energy_diff + margin)  # [B, B]
+            step_loss = pair_loss[valid].mean()                      # scalar
 
-            # Mean over active pairs at this step (keeps scale comparable to within-traj term)
-            active_count = pair_mask.sum().clamp_min(1)
-            total_loss = total_loss + (pair_losses.sum() / active_count)
-            cross_traj_active_pairs += int(pair_mask.sum().item())
+            cross_loss_sum = cross_loss_sum + step_loss
+            cross_traj_active_pairs += n_valid
+            active_step_count += 1
+
+        if active_step_count > 0:
+            cross_loss = cross_loss_sum / active_step_count
+        else:
+            cross_loss = cross_loss_sum  # 0.0 tensor
+        total_loss = total_loss + cross_loss
+
+    cross_traj_quality_std_mean = cross_traj_quality_std_sum / max(N, 1)
 
     # --- Spearman correlation (within-trajectory diagnostic, unchanged) ---
     with torch.no_grad():
@@ -171,9 +188,10 @@ def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddi
     metrics = {
         "trajectory_quality_first": torch.tensor(batch_quality[0], device=device),
         "trajectory_quality_last": torch.tensor(batch_quality[-1], device=device),
-        "active_pairs": torch.tensor(float(active_pairs), device=device),
+        "active_pairs": torch.tensor(float(within_active), device=device),
         "total_pairs": torch.tensor(float(total_pairs), device=device),
         "cross_traj_active_pairs": torch.tensor(float(cross_traj_active_pairs), device=device),
+        "cross_traj_quality_std": torch.tensor(float(cross_traj_quality_std_mean), device=device),
         "energy_accuracy_spearman": torch.tensor(float(spearman_corr), device=device),
         "energy_gradient_cosine_sim": cosine_sim.detach(),
     }

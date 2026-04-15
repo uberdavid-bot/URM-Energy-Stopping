@@ -796,22 +796,22 @@ TBD
 ### Experiment R2i-h96 — Cross-trajectory ranking at h=96
 Date: 2026-04-14
 Script: `scripts/train_r2g_r2i_h96.sh` (second experiment)
-Config: `config/arch/urm_r2i_h96_cross_traj.yaml` — h=96 backbone + cross-trajectory ranking (`cross_trajectory_k=2`), `energy_loss_weight=0.05`, position_mlp energy head.
+Config: `config/arch/urm_r2i_h96_cross_traj.yaml` — h=96 backbone + `cross_trajectory=true`, `energy_loss_weight=0.05`, position_mlp energy head.
 
-**Motivation:** Cross-trajectory ranking creates pairs where step index is held constant by construction. For the same recurrence step t, compare hidden state quality across two different augmentations of the same puzzle. The energy head literally cannot use step depth as a shortcut because both items in every pair share the same step.
+**Motivation:** Cross-trajectory ranking creates pairs where step index is held constant by construction. For the same recurrence step t, compare hidden state quality across different augmentations of the same puzzle. The energy head literally cannot use step depth as a shortcut because both items in every pair share the same step.
 
-**Pipeline finding that makes this cheap:** `puzzle_dataset._sample_batch` already fills each training batch with augmentations of a single puzzle (batch=512, num_aug=1000, append_size=512 on the first iteration, loop exits). So intra-batch same-step pairs are naturally same-puzzle cross-augmentation pairs. No dataloader change, no extra forward passes — cross-trajectory pairs reuse the per-example energies already computed for the within-trajectory ranking loss. VRAM cost is negligible.
+**Pipeline finding that makes this free:** `puzzle_dataset._sample_batch` already fills each training batch with augmentations of a single puzzle (batch=512, num_aug=1000, append_size=512 on the first iteration, loop exits). So intra-batch same-step pairs are naturally same-puzzle cross-augmentation pairs. No dataloader change, no extra forward passes — cross-trajectory pairs reuse the per-example energies already computed for the within-trajectory ranking loss. VRAM cost is a [B, B]=512² pairwise matrix per step (negligible vs the transformer forward pass).
 
-**Implementation:** For each step t, randomly permute batch indices, pair `perm[:B/2]` with `perm[B/2:B]`, compute signed-gap margin loss across the B/2 pairs. Combined additively with the within-trajectory ranking term.
+**Implementation:** At each step t, compute the [B, B] all-pairs quality-diff and energy-diff matrices. For every `quality_diff > 0` pair, penalize `F.relu(energy_diff + margin)`, weighted by `quality_diff` as the gap. Mean over valid pairs per step, then mean over active steps. Within-trajectory term is also mean-normalized by its active-pair count, so `energy_loss_weight` controls the combined ranking term cleanly without one term drowning out the other.
 
 **Why this is orthogonal to ranking noise:** Ranking noise corrupts shortcut features but keeps the same within-trajectory pairs (step i vs step j). Cross-trajectory creates entirely new same-step pairs where the shortcut doesn't apply. If hidden states genuinely lack quality-discriminative features at matched depth, both fail. But A3's eval Spearman of -0.264 with the detached head suggests discriminative features DO exist in natural hidden states — the coupled head just doesn't learn to use them because the shortcut is easier.
 
 **Key design choices:**
-- K=2 interpreted structurally: same-step pairs are created within the existing batch (all augmentations of one puzzle). No change to the dataloader.
-- Same-step pairs added to (not replacing) within-trajectory pairs.
+- [B, B] all-pairs at each step. At B=512 this is ~131K potential pairs per step × 8 steps. Most will be ties or small gaps; `quality_diff > 0` filters strict pairs, `quality_diff` weights them.
+- Same-step pairs added to (not replacing) within-trajectory pairs; both terms mean-normalized before combination.
 - elw=0.05 to limit reconstruction impact.
 - Quality measured against each augmentation's own ground truth.
-- New metric `cross_traj_active_pairs` logged so we can verify pairs > 0 in the first training step.
+- Diagnostics logged: `cross_traj_active_pairs` (strictly-beaten pair count) and `cross_traj_quality_std` (std of quality across the B augmentations per step, averaged across steps). If `cross_traj_quality_std` ≈ 0 across training, augmentations have nearly identical quality and the signal is empty — kill early.
 
 Hypothesis: Cross-trajectory pairs force the energy head to learn quality features that transfer across inputs, since the step-index shortcut is structurally eliminated.
 

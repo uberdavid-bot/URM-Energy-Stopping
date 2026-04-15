@@ -10,7 +10,7 @@ loss:
   energy_loss_weight: 0.05
   ranking_margin: 0.1
   ranking_noise_sigma: 0.0
-  cross_trajectory_k: 2
+  cross_trajectory: true
 
 loops: 8
 num_layers: 1

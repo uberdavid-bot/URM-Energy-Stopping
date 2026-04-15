@@ -826,6 +826,53 @@ TBD
 
 ---
 
+### Experiment R3-diag — Eval-only MCMC diagnostic using Q-halt as energy function
+Date: 2026-04-15
+Script: `scripts/eval_qhalt_mcmc.py`
+Checkpoint: R1-h96-baseline-260414 (step 80011, EMA weights — the best backbone: 15.59% eval exact)
+Results TSV: `results/qhalt_mcmc_eval.tsv`
+
+**Motivation:** The energy head failed as a verifier (R2 series). But Q-halt already provides a well-calibrated pointwise quality signal — so rather than training a new energy landscape, use Q-halt's pre-sigmoid logit as the energy function for MCMC. Take gradient of Q-halt confidence w.r.t. hidden states, step toward higher confidence. This isolates the MCMC-refinement question from the energy-training question: does *any* gradient-based hidden-space optimization improve predictions beyond URM recurrence, using the best available quality signal?
+
+**Grid:** M ∈ {4, 5, 6} URM steps, K ∈ {1, 2, 4} MCMC steps, step_size ∈ {1e-4, 1e-3, 1e-2, 0.1, 0.3, 1.0}, ±normalized gradient. 108 conditions total.
+
+**Two implementation issues that had to be resolved before the grid ran:**
+1. **Gradient localization.** A naive `grad(q_head(hidden[:, 0]).sum(), hidden)` gives a gradient nonzero only at position 0 (the puzzle-embedding slice). `lm_head(hidden)[:, P:]` then discards position 0, so the MCMC update cannot change decoded tokens by construction — the literal spec produces zero change in predictions regardless of step size (verified in a 5-batch sanity run). **Fix:** route Q-halt through one transformer probe at each MCMC step: `grad(q_head(transformer(hidden + input_emb)[:, 0]).sum(), hidden)`. Autograd propagates the gradient through attention back to every position, so the update reaches the token positions lm_head decodes. One forward per MCMC step, preserving matched compute with (M+K) URM.
+2. **Step-size grid too small.** Initial sanity run with the spec grid {1e-4, 1e-3, 1e-2} flipped 0.05% of tokens at the largest value — far below anything that can move exact accuracy. The gradient magnitude was still dominated by position 0 (L2 = 18.9) and only weakly leaked to token positions (L2 = 0.38). Extended to {1e-4, 1e-3, 1e-2, 0.1, 0.3, 1.0} to find the regime where predictions actually change. 1.0 with normalized gradient flips ~2.6% of tokens.
+
+### Result
+**Q-halt is not a useful energy function for MCMC refinement.** The failure criterion was hit exactly as specified:
+
+- **Best delta vs URM-M (does MCMC improve the starting point?): +0.0001 exact.** Across all 108 conditions, no configuration improves over M-step URM by more than a single puzzle. Most conditions produce 0.0000 or negative deltas.
+- **Best delta vs URM-(M+K) (matched-compute): +0.0203 at M=6, K=4, step_size=0.1, norm=0.** This is a **red herring, not an MCMC win**. URM-10 exact (0.1406) is worse than URM-6 (0.1608) because R1-h96 peaks at step 6 and degrades at steps 7–8+ (confirmed in the R1-h96 per-step table). So MCMC at M=6 "wins" vs URM-(6+4) only by *failing to move the hidden state* — it effectively freezes at step 6 while pure URM runs past the peak. Not a refinement effect.
+- **Adversarial Q-halt optimization confirmed.** At large step sizes, Q-halt confidence soars while exact accuracy drops:
+
+| M | K | step_size | norm | q_before → q_after | exact_before → exact_after |
+|---|---|---|---|---|---|
+| 4 | 4 | 1.0 | 1 | −3.749 → **+5.368** | 0.1397 → **0.1303** |
+| 5 | 4 | 1.0 | 1 | −3.626 → **+5.491** | 0.1522 → **0.1440** |
+| 6 | 4 | 1.0 | 1 | −3.601 → **+5.539** | 0.1608 → **0.1534** |
+
+At step_size=1.0 K=4 normalized, Q-halt's sigmoid moves from ~0.023 to ~0.996 — a 40× increase in stated confidence — while exact accuracy drops ~0.7–0.9pp. Q-halt is being successfully fooled into high confidence in regions of hidden-state space where lm_head decoding is equal or worse.
+
+- **The "sweet spot" is no movement.** The smallest step sizes (1e-4, 1e-3) produce 0.0000 delta because the hidden state barely changes; step_size=0.1 is approximately neutral; step_size ≥ 0.3 begins hurting. There is no regime where Q-halt-directed MCMC helps.
+
+**Key diagnostic evidence on the two failure modes:**
+- **Gradient imbalance:** Even with the transformer probe, gradient L2 at position 0 (puzzle-emb slice, ~18.9) is ~50× larger than at token positions (~0.38). Attention leaks signal to token positions but weakly. Normalized gradient fixes the per-position magnitude but the *direction* at token positions is still dominated by features optimized for Q-halt rather than lm_head decoding.
+- **Manifold mismatch:** Q-halt's gradient direction does not align with the direction that improves lm_head decoding. Q-halt was trained to predict "is this hidden state's argmax correct?" pointwise — it reads out from the puzzle-emb token after a full URM step. The features that make Q-halt confident are NOT the features that make lm_head decode the correct answer. Optimizing Q-halt's readout is orthogonal (or adversarial) to improving the decoded prediction.
+
+### Conclusion
+
+**Pure Q-halt gradient MCMC does not improve predictions at any (M, K, step_size) condition on the R1-h96 backbone.** The literal failure criterion from the experiment spec is satisfied: MCMC accuracy ≤ URM accuracy at all conditions AND Q-halt confidence increases adversarially as step size grows. This rules out the cheapest version of hidden-space refinement using the existing quality signal.
+
+**What this means for R3.** R3 (trained MCMC with dual loss and second-order gradients) is NOT obviated by this result — the failure here is specifically about using a *pointwise classifier trained on unmoved hidden states* as an energy function after-the-fact. An energy function trained *with MCMC in the loop* (create_graph=True, dual reconstruction loss) would be co-adapted to its own gradient direction, which is exactly the property Q-halt lacks. The docs_architecture MCMC design (energy head + dual loss) is the right path; the shortcut of "reuse Q-halt as energy" does not work.
+
+**What this tells us about R1-h96's trajectory.** The best step is step 6 (0.1608 exact) and the model degrades over steps 7–8. The fact that Q-halt-optimized MCMC can't recover this suggests the degradation isn't fixable by staying in the same "quality" basin — moving toward higher Q-halt confidence takes you *away* from the lm_head decoding optimum. The degradation is a fundamental backbone issue (likely: later steps over-refine into puzzle-specific features that lose generality), not an off-manifold wandering that MCMC could reverse.
+
+**Recommendation:** Do not pursue Q-halt-gradient MCMC further. If R3 is pursued, it must train a dedicated energy function with MCMC in the training loop. Otherwise, focus on R2g-series extensions (elw/σ sweeps) or accept that the energy-refinement path is paper-ready as a negative result with clean ablations.
+
+---
+
 ## Lessons Carried Forward
 1. **Dual reconstruction loss is mandatory** for MCMC training (Exp 3a).
 2. **Contrastive loss alone causes energy collapse** (Exp 1). Use trajectory ranking as primary energy training signal (first-order, R2). MCMC reconstruction provides second-order signal in R3.

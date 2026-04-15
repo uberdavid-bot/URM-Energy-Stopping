@@ -957,6 +957,44 @@ Failure: `mcmc_improvement ≤ 0` — MCMC degrades predictions, energy landscap
 Risk: Second-order gradients may cause training instability (gradient explosion through energy head). Monitored via separate gradient clipping and energy value tracking. MCMC may also be a worse version of additional URM steps — same hidden space but without attention's inductive bias.
 
 ### Result
+**MCMC is a no-op at step_size=0.01 — updates too small relative to URM step magnitude, NOT a precision issue.** Killed at step 37,775/80,011 (47%, ~5.5h of 11h ETA) once the diagnosis was clear.
+
+Per-step exact accuracy at eval #7 (step 37.5K, pre-kill): 0.33% → 1.00% → 4.94% → 7.87% → **8.40%** (URM end) → 8.39% → 8.39% → 8.39% (MCMC). mcmc_improvement = −7.2e-5 (statistical noise, one puzzle). Reconstruction loss: 0.973 → 0.506 across 7 evals (URM backbone training healthy). Q-halt pass@100 25.97%; energy pass@100 1.95%.
+
+**Energy head learned a directionally correct landscape.** Strictly monotonic energy decrease across MCMC steps at every single eval: urm_end → mcmc_6 → mcmc_7 → mcmc_8 descending by ~0.002-0.003 per step at every checkpoint. `create_graph=True` training through MCMC reconstruction loss works as designed — the landscape descent is real.
+
+**Initial diagnosis (BF16 underflow) was wrong.** Reported `step_6_delta_norm = 1.6e-5` vs `step_5_delta_norm = 2.8e-3` made it look like MCMC updates were rounding to zero in BF16. Verification by running `EnergyLossHead` directly on R3's step_37486 checkpoint with a real eval batch showed the raw per-batch-mean `step_6_delta_norm = 0.00818` (post-aggregation) — essentially the designed `step_size = 0.01`. The small reported value was a metric aggregation bug in `pretrain.py`: `delta_norm` was a per-batch `.mean()` but the eval loop sums-then-divides-by-count, under-reporting by ~batch_size. Fixed in a separate commit.
+
+**The real diagnosis: step_size=0.01 is a ~150× negligible perturbation.** URM step 5 per-position delta is ~1.5 on R3's partially-trained backbone; MCMC step_size=0.01 produces ~0.01-per-position updates. The ratio (≈150:1) means MCMC can't flip any argmax that URM's previous pass didn't already move.
+
+Q-halt reranking: pass@1 3.90%, pass@100 25.97%, pass@1000 27.27%. Energy reranking: pass@1 0%, pass@100 1.95%, pass@1000 16.23%.
+
+**Key finding:** Trained energy-gradient MCMC at create_graph=True produces a directionally correct descent landscape, but a step_size of 0.01 is too small to compete with URM's natural step magnitude. R3b tests step_size=0.1.
+
+**Metric aggregation bug:** `step_k_delta_norm` and `current_energy` were under-reported by ~batch_size (~512×) across ALL prior experiments. Fixed in the commit immediately preceding R3b. Historical values in this log for these two metrics should be multiplied by ~512 for correct magnitudes. Accuracy, reconstruction loss, Q-halt, exact_accuracy, and trajectory ranking metrics were unaffected.
+
+---
+
+### Experiment R3b — Meaningful MCMC magnitude (step_size=0.1)
+Date: 2026-04-15
+Script: `scripts/train_r3b_hybrid_h96.sh`
+Config: `config/arch/urm_r3b_hybrid_h96.yaml` — identical to R3 except `mcmc_step_size=0.1` (was 0.01). With `mcmc_random_step_size=true`, training samples from [0.033, 0.1]; eval uses the fixed 0.1. All other fields unchanged: depth=1, h=96, 4 heads, expansion=2, 8 total steps (5 URM + 3 MCMC), dropout=0.1, linear energy head, Langevin noise σ=0.003 during training, `energy_loss_weight=0.0` (no trajectory ranking), grad clips 5.0 / 1.0.
+
+**Motivation.** R3 proved the energy head learns a directionally correct landscape (monotonic descent at every eval) but step_size=0.01 produces ~0.01-per-position updates vs URM step 5's ~1.5 per-position — a ~150× negligible perturbation. At step_size=0.1, per-position updates become ~0.1 vs URM's ~1.5, i.e. ~7% of URM magnitude. That's the regime where MCMC can actually flip argmax decisions.
+
+**R3-diag context.** R3-diag showed Q-halt gradient MCMC going adversarial at step_size ≥ 0.3 on R1-h96. But Q-halt had position-0 gradient concentration (50× imbalance) and was never trained for MCMC. R3b's energy head operates on the full sequence (no position-0 bottleneck) and is trained through `create_graph=True` on MCMC-moved hidden states (no manifold mismatch). step_size=0.1 is the first honest test of a co-adapted energy landscape at a meaningful magnitude.
+
+**Hypothesis:** The create_graph-trained energy landscape directs hidden states toward decoding quality. At step_size=0.1, the landscape's descent produces accuracy improvements rather than adversarial degradation.
+
+Success criterion: `mcmc_improvement > 0` AND eval exact at step 8 ≥ R1-h96's step 7 peak (16.09%).
+Partial success: `mcmc_improvement > 0` but eval exact < 16.09%.
+Failure mode A (adversarial): `mcmc_improvement < 0` with `energy_decrease < 0` — landscape direction doesn't align with decoding quality.
+Failure mode B (collapse): energy values flat across MCMC steps — head collapsed under larger gradient magnitudes.
+Failure mode C (instability): NaN or divergent training — second-order grads at 10× step size overwhelm gradient clipping.
+
+Risk: 10× step size means the energy head's gradient is sent through a 10× louder signal, which could destabilize training. Mitigations: grad clip at 1.0 on energy head params, randomized step size during training, Langevin noise, `ema_rate=0.999` for eval.
+
+### Result
 TBD
 
 ---

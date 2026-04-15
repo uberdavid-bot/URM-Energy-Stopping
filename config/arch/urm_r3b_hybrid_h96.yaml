@@ -1,0 +1,44 @@
+# R3b: Hybrid URM + MCMC at h=96, step_size=0.1 (10x R3)
+# R3 proved the energy head learns a directionally correct landscape (monotonic
+# descent every eval) but step_size=0.01 produces ~0.01-per-position updates
+# vs URM's ~1.5-per-position — a ~150x gap that can't flip any decoded token.
+# 0.1 puts MCMC at ~7% of URM's magnitude, the first meaningful test.
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+  energy_loss_weight: 0.0
+  ranking_margin: 0.1
+
+loops: 8
+num_layers: 1
+hidden_size: 96
+num_heads: 4
+expansion: 2
+
+attn_dropout: 0.1
+mlp_dropout: 0.1
+recurrence_noise: 0.0
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+energy_threshold: 0.005
+min_steps: 8
+
+refinement: hybrid
+stopping: qhalt
+ranking: qhalt
+
+# MCMC config — step_size 10x R3; random_step_size samples from [0.033, 0.1]
+# during training (EBT landscape regularization)
+mcmc_start_step: 5
+mcmc_step_size: 0.1
+mcmc_langevin_noise: 0.003
+mcmc_random_step_size: true
+
+# Linear energy head (mean pool -> Linear(96, 1))
+energy_head_type: linear
+
+ema: True
+ema_rate: 0.999

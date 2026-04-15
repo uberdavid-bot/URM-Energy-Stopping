@@ -793,23 +793,27 @@ TBD
 
 ---
 
-### Experiment R2i-h96 — Cross-trajectory ranking at h=96
+### Experiment R2i-h96 — Cross-trajectory ranking at h=96 (cross-traj only, no within-traj)
 Date: 2026-04-14
 Script: `scripts/train_r2g_r2i_h96.sh` (second experiment)
-Config: `config/arch/urm_r2i_h96_cross_traj.yaml` — h=96 backbone + `cross_trajectory=true`, `energy_loss_weight=0.05`, position_mlp energy head.
+Config: `config/arch/urm_r2i_h96_cross_traj.yaml` — h=96 backbone + `cross_trajectory=true`, `energy_loss_weight=0.1`, position_mlp energy head.
 
 **Motivation:** Cross-trajectory ranking creates pairs where step index is held constant by construction. For the same recurrence step t, compare hidden state quality across different augmentations of the same puzzle. The energy head literally cannot use step depth as a shortcut because both items in every pair share the same step.
 
+**Cross-trajectory only — within-trajectory ranking is dropped entirely.** Deep supervision in the reconstruction path already teaches step-wise improvement (weighted per-step reconstruction + Q-halt losses with `(t+1)/N` linear ramp). The within-trajectory ranking term is redundant for the backbone AND is precisely the source of the step-index shortcut diagnosed in A3 and R2c-h96 (eval Spearman +0.007 despite perfect train Spearman). Keeping within-traj alongside cross-traj would re-inject the shortcut the cross-traj term is designed to avoid. So R2i runs cross-trajectory as the *only* energy-head training signal.
+
+**Why elw bumped to 0.1 (from the initial R2g setting of 0.05):** Cross-trajectory gradients are constructive — they push the backbone toward features that discriminate quality across same-depth augmentations, which is aligned with the reconstruction objective (same-depth augmentations that solve the puzzle should look different from augmentations that don't, regardless of step). Within-trajectory gradients at h=96 competed for capacity (R2c-h96 inversion), but cross-trajectory gradients should reinforce rather than compete. The higher weight pushes harder on the cross-traj signal when it's the only ranking term in play.
+
 **Pipeline finding that makes this free:** `puzzle_dataset._sample_batch` already fills each training batch with augmentations of a single puzzle (batch=512, num_aug=1000, append_size=512 on the first iteration, loop exits). So intra-batch same-step pairs are naturally same-puzzle cross-augmentation pairs. No dataloader change, no extra forward passes — cross-trajectory pairs reuse the per-example energies already computed for the within-trajectory ranking loss. VRAM cost is a [B, B]=512² pairwise matrix per step (negligible vs the transformer forward pass).
 
-**Implementation:** At each step t, compute the [B, B] all-pairs quality-diff and energy-diff matrices. For every `quality_diff > 0` pair, penalize `F.relu(energy_diff + margin)`, weighted by `quality_diff` as the gap. Mean over valid pairs per step, then mean over active steps. Within-trajectory term is also mean-normalized by its active-pair count, so `energy_loss_weight` controls the combined ranking term cleanly without one term drowning out the other.
+**Implementation:** At each step t, compute the [B, B] all-pairs quality-diff and energy-diff matrices. For every `quality_diff > 0` pair, penalize `F.relu(energy_diff + margin)`, weighted by `quality_diff` as the gap. Mean over valid pairs per step, then mean over active steps. In the code path, when `cross_trajectory=True` the within-trajectory loop in `trajectory_ranking_loss` is skipped entirely — `total_loss = recon_loss + 0.5 * qhalt_loss + elw * cross_traj_loss`.
 
 **Why this is orthogonal to ranking noise:** Ranking noise corrupts shortcut features but keeps the same within-trajectory pairs (step i vs step j). Cross-trajectory creates entirely new same-step pairs where the shortcut doesn't apply. If hidden states genuinely lack quality-discriminative features at matched depth, both fail. But A3's eval Spearman of -0.264 with the detached head suggests discriminative features DO exist in natural hidden states — the coupled head just doesn't learn to use them because the shortcut is easier.
 
 **Key design choices:**
+- Cross-trajectory only, no within-trajectory ranking.
 - [B, B] all-pairs at each step. At B=512 this is ~131K potential pairs per step × 8 steps. Most will be ties or small gaps; `quality_diff > 0` filters strict pairs, `quality_diff` weights them.
-- Same-step pairs added to (not replacing) within-trajectory pairs; both terms mean-normalized before combination.
-- elw=0.05 to limit reconstruction impact.
+- elw=0.1 (higher than R2g's 0.05) — cross-trajectory gradients are constructive so the bigger weight should help, not hurt.
 - Quality measured against each augmentation's own ground truth.
 - Diagnostics logged: `cross_traj_active_pairs` (strictly-beaten pair count) and `cross_traj_quality_std` (std of quality across the B augmentations per step, averaged across steps). If `cross_traj_quality_std` ≈ 0 across training, augmentations have nearly identical quality and the signal is empty — kill early.
 

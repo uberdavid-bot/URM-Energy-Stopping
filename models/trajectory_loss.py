@@ -11,21 +11,25 @@ def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddi
                             training=True):
     """Margin ranking loss over URM trajectory steps.
 
-    Two ranking terms:
-      1. Within-trajectory (default): for each pair of steps (i, j) where step i
-         has higher batch-mean quality than step j, require E(mean h_i) < E(mean h_j).
-         This learns temporal ordering of the refinement trajectory.
-      2. Cross-trajectory (optional, `cross_trajectory=True`): at each step t, take
-         the [B, B] all-pairs ranking over per-example quality and per-example
-         energy. Because `_sample_batch` fills every training batch with
-         augmentations of a single puzzle, intra-batch pairs at the same step are
-         naturally same-puzzle cross-augmentation pairs — step index is held
-         constant by construction, so the energy head cannot use step depth as a
-         shortcut for these pairs.
+    Two mutually-exclusive modes:
+      - `cross_trajectory=False` (default): within-trajectory ranking. For each
+        pair of steps (i, j) where step i has higher batch-mean quality than
+        step j, require E(mean h_i) < E(mean h_j). Learns temporal ordering of
+        the refinement trajectory. This is the path that created the step-index
+        shortcut diagnosed in A3 / R2c-h96.
+      - `cross_trajectory=True`: cross-trajectory ranking only, no within-
+        trajectory term. At each step t, take the [B, B] all-pairs ranking over
+        per-example quality and per-example energy. Because `_sample_batch`
+        fills every training batch with augmentations of a single puzzle,
+        intra-batch pairs at the same step are naturally same-puzzle cross-
+        augmentation pairs. Step index is held constant by construction — the
+        energy head cannot use step depth as a shortcut. Deep supervision in
+        the reconstruction path already handles step-wise improvement, so the
+        within-trajectory ranking term is redundant for the backbone and is
+        dropped here.
 
-    Both terms are mean-normalized by their active-pair count and summed so that
-    `energy_loss_weight` controls the combined strength without one term drowning
-    out the other.
+    Both modes mean-normalize by their active-pair count so `energy_loss_weight`
+    acts as a single knob.
 
     Args:
         model: ARCModel (has compute_joint_energy and inner.puzzle_emb_len)
@@ -98,21 +102,25 @@ def trajectory_ranking_loss(model, all_hidden, all_logits, labels, input_embeddi
     energies_tensor = torch.stack(energies_avg)  # [N]
 
     # --- Within-trajectory ranking (step i vs step j on batch-mean quality/energy) ---
+    # Skipped when cross_trajectory=True: deep supervision already teaches
+    # step-wise improvement and this term is the source of the step-index
+    # shortcut we want to eliminate.
     within_active = 0
     within_loss_sum = torch.tensor(0.0, device=device)
     total_pairs = N * (N - 1) // 2
 
-    for i in range(N):
-        for j in range(i + 1, N):
-            if batch_quality[i] != batch_quality[j]:
-                within_active += 1
-                if batch_quality[i] > batch_quality[j]:
-                    gap = batch_quality[i] - batch_quality[j]
-                    pair_loss = gap * F.relu(energies_tensor[i] - energies_tensor[j] + margin)
-                else:
-                    gap = batch_quality[j] - batch_quality[i]
-                    pair_loss = gap * F.relu(energies_tensor[j] - energies_tensor[i] + margin)
-                within_loss_sum = within_loss_sum + pair_loss
+    if not cross_trajectory:
+        for i in range(N):
+            for j in range(i + 1, N):
+                if batch_quality[i] != batch_quality[j]:
+                    within_active += 1
+                    if batch_quality[i] > batch_quality[j]:
+                        gap = batch_quality[i] - batch_quality[j]
+                        pair_loss = gap * F.relu(energies_tensor[i] - energies_tensor[j] + margin)
+                    else:
+                        gap = batch_quality[j] - batch_quality[i]
+                        pair_loss = gap * F.relu(energies_tensor[j] - energies_tensor[i] + margin)
+                    within_loss_sum = within_loss_sum + pair_loss
 
     if within_active > 0:
         within_loss = within_loss_sum / within_active

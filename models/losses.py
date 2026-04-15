@@ -135,11 +135,16 @@ class EnergyLossHead(nn.Module):
             final_q_pred = all_q_logits[-1] >= 0
             metrics["q_halt_accuracy"] = (valid & (final_q_pred == final_seq_correct)).sum()
 
-            # Energy at final step
+            # Energy at final step. Return as sum-over-batch so that the
+            # pretrain aggregation `sum_across_batches / count` recovers the
+            # per-sample mean. Returning `.mean()` here (as the code used to)
+            # under-reports by a factor of batch_size, because pretrain sums
+            # per-batch means and divides by total valid samples, not by
+            # num_batches.
             final_energy = self.model.compute_joint_energy(
                 input_embeddings, all_hidden[-1][:, P:].detach()
             )
-            metrics["current_energy"] = final_energy.mean().detach()
+            metrics["current_energy"] = final_energy.sum().detach()
 
             # --- Per-step metrics (all steps) ---
             per_step_seq_correct = []
@@ -155,7 +160,14 @@ class EnergyLossHead(nn.Module):
                 metrics[f"step_{t+1}_exact_accuracy"] = (valid & step_seq_correct).sum()
 
                 if t > 0:
-                    delta = (all_hidden[t] - all_hidden[t - 1]).norm(dim=-1).mean()
+                    # Per-position L2 delta norm, averaged over positions per
+                    # sample, then summed across samples. After pretrain's
+                    # `/count` aggregation this yields the mean per-position
+                    # delta norm averaged across all eval samples. Returning
+                    # a raw `.mean()` here would under-report by batch_size.
+                    delta = (
+                        (all_hidden[t] - all_hidden[t - 1]).norm(dim=-1).mean(dim=-1).sum()
+                    )
                     metrics[f"step_{t+1}_delta_norm"] = delta
 
             # --- Hybrid MCMC metrics: improvement over URM endpoint + per-MCMC-step energy ---
@@ -164,7 +176,8 @@ class EnergyLossHead(nn.Module):
                 if 0 < mcmc_start < N:
                     urm_end_correct = per_step_seq_correct[mcmc_start - 1]
                     final_correct_mcmc = per_step_seq_correct[-1]
-                    # Net change in correct count (scaled by count so /count gives rate delta)
+                    # Net change in correct count (sum of per-sample {-1,0,+1})
+                    # — pretrain's /count yields the accuracy delta rate.
                     mcmc_improvement = (
                         (valid & final_correct_mcmc).to(torch.int64)
                         - (valid & urm_end_correct).to(torch.int64)

@@ -95,8 +95,8 @@ The codebase has been streamlined to only the active experiment pipeline:
 - **Deleted losses**: `models/dsm_loss.py`, `ACTLossHead` — DSM was unnecessary; contrastive-only caused energy collapse; ACTLossHead was the old carry-based loss head. Note: `models/trajectory_loss.py` was re-created for R2 (trajectory ranking loss for energy head co-training).
 - **Deleted carry infrastructure**: `ModelCarry` dataclass, `ARCBackbone.forward()`, `ARCBackbone.empty_carry()`, `ARCBackbone.reset_carry()`, `ARCModel.forward()`, `ARCModel.initial_carry()`, per-sample halting logic. Replaced by `forward_trajectory()`.
 - **MLP rounding fix**: `_find_multiple` granularity changed from 256 to 8 in `models/layers.py` to allow smooth capacity scaling at small model sizes (at h=64/exp=2, inter=88 instead of 256).
-- **Active configs**: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`, R1 experiment configs, R2 series configs (`urm_r2_trajectory.yaml`, `urm_r2b_trajectory_dropout.yaml`, `urm_r2c_pos_mlp.yaml`, `urm_r2d_pos_conv.yaml`, `urm_r2e_pos_attn.yaml`), and `urm_r1i_dropout.yaml`.
-- **Active scripts**: `scripts/train_r2c_cascade.sh`, `scripts/train_r2b_trajectory_dropout.sh`, `scripts/train_r1i_dropout.sh`, `scripts/eval_energy_ranking.py` (eval-only energy ranking comparison), plus individual experiment scripts in `scripts/`.
+- **Active configs**: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`; h=64 series: `urm_r1i_dropout.yaml`, `urm_r2_trajectory.yaml`, `urm_r2b_trajectory_dropout.yaml`, `urm_r2c_pos_mlp.yaml`, ablation_a1/a2/a3/a4 variants; **h=96 series (current standard)**: `urm_r1_h96_baseline.yaml`, `urm_r2c_h96_pos_mlp.yaml`, `urm_r2g_h96_ranking_noise.yaml`, `urm_r2i_h96_cross_traj.yaml`.
+- **Active scripts**: `scripts/train_h96_scale.sh` (R1-h96 + R2c-h96), `scripts/train_r2g_r2i_h96.sh` (R2g + R2i), `scripts/eval_qhalt_mcmc.py` (R3-diag eval-only MCMC), `scripts/eval_energy_ranking.py` (energy ranking comparison), plus legacy per-experiment scripts.
 
 ### Flat trajectory forward architecture
 `ARCModel.forward_trajectory(batch, N)` is the primary entry point. Runs N recurrence steps in a single call with full gradient flow. `EnergyLossHead.forward(batch)` calls `forward_trajectory` and computes deep supervision loss, per-step metrics, and eval stopping metrics. No carry state, no per-sample halting, no outer loop.
@@ -106,17 +106,20 @@ Three model config fields control behavior:
 - **`stopping`**: `"qhalt"` (learned halt signal) | `"energy"` (energy convergence) — eval-only stopping criterion.
 - **`ranking`**: `"qhalt"` (Q-halt confidence) | `"energy"` (negative energy) — confidence signal for pass@K reranking.
 
-Two model config fields control dropout (R1i+):
+Three model config fields control regularization (R1i+, A4+):
 - **`attn_dropout`**: float (default 0.0). Dropout applied inside flash attention. Passed through `ARCBlock` → `Attention` → `flash_attn_func(dropout_p=...)`. Training only.
 - **`mlp_dropout`**: float (default 0.0). Dropout applied after MLP output, before residual add in `ARCBlock`. Standard `nn.Dropout`.
+- **`recurrence_noise`**: float (default 0.0). Additive Gaussian noise σ applied to hidden states after each URM transformer pass, training only. A4 experiments tested this as a dropout alternative — it did not help at σ=0.005 (R1h-equivalent) or σ=0.003+dropout=0.05 (below R1i). Documented negative. Dropout=0.1 remains the standard.
 
 Two model config fields control energy head architecture (R2c+):
-- **`energy_head_type`**: `"linear"` (default, mean_pool→Linear(H,1), 65 params) | `"position_mlp"` (per-position MLP→sum, ~2K params) | `"position_conv_mlp"` (conv+MLP, ~3K params) | `"position_attn_mlp"` (attention+MLP, ~10K params). Implemented via `PositionEnergyHead` class.
+- **`energy_head_type`**: `"linear"` (default, mean_pool→Linear(H,1), 65 params) | `"position_mlp"` (per-position MLP→sum, ~2K params at h=64 / ~3K at h=96) | `"position_conv_mlp"` (conv+MLP) | `"position_attn_mlp"` (attention+MLP). Implemented via `PositionEnergyHead` class.
 - **`energy_head_hidden`**: int (default 32). Hidden dim for per-position MLP in non-linear energy heads.
 
-Two loss config fields control energy head co-training (R2+):
-- **`energy_loss_weight`**: float (default 0.0). When > 0, adds trajectory ranking loss to total loss. Weight 0.1 used in R2 series.
-- **`ranking_margin`**: float (default 0.1). Margin for all-pairs ranking loss.
+Four loss config fields control energy head co-training (R2+/R2g/R2i):
+- **`energy_loss_weight`**: float (default 0.0). When > 0, adds trajectory ranking loss to total loss. Weight 0.1 used in R2 series at h=64 and is now in the "starving reconstruction" regime at h=96. R2g uses 0.05.
+- **`ranking_margin`**: float (default 0.1). Margin for pair ranking loss.
+- **`ranking_noise_sigma`**: float (default 0.0). R2g: σ sampled per step ~ Uniform(0, ranking_noise_sigma), applied to hidden states before the energy head scores them. Reconstruction path uses clean hidden states. Training only. Breaks the step-index shortcut (R2g-h96: eval Spearman +0.007 → −0.227).
+- **`cross_trajectory`**: bool (default False). R2i: replace within-trajectory ranking with [B, B] same-step all-pairs ranking across augmentations within a batch. When True, the within-trajectory loop in `trajectory_ranking_loss` is skipped entirely; `total_loss = recon + 0.5*qhalt + elw * cross_traj`. Documented negative at h=96 due to train (same-puzzle augs) ≠ eval (heterogeneous puzzles) distribution mismatch.
 
 Two pretrain config fields control gradient clipping:
 - **`grad_clip_backbone`**: float (default 5.0). Max gradient norm for backbone parameters.
@@ -125,19 +128,29 @@ Two pretrain config fields control gradient clipping:
 ### Per-step metrics
 Per-step metrics are computed inside `EnergyLossHead` for both train and eval: `step_k_accuracy`, `step_k_exact_accuracy`, `step_k_delta_norm`. Eval mode additionally computes stopping metrics: `qhalt_stop_step`, `qhalt_stop_accuracy`, `energy_stop_step`, `energy_stop_accuracy`.
 
-### Right-size the model for the problem
-Validated config: depth=1, h=64, expansion=2, 8 steps, 10×10 grids, ~35K params. R1h confirmed monotonic per-step accuracy ramp (0.13% → 3.76% exact accuracy step 1→6). R1i added dropout=0.1 (attn+mlp), improving eval exact to 5.33% and closing train/eval ratio from 6:1 to 3.9:1. R2c (with position-aware energy co-training) achieved the best eval exact at 6.95%. Prior R1 experiments showed flat per-step curves because hidden states were detached between steps; deep supervision + cross-step gradient flow fixed this.
+### Standard backbone: R1-h96 (the validated operating point)
+**Current best backbone**: depth=1, **h=96**, expansion=2, 8 steps, num_heads=4 (head_dim=24), attn_dropout=0.1, mlp_dropout=0.1, recurrence_noise=0.0. **~76.6K params (transformer)**. `config/arch/urm_r1_h96_baseline.yaml`. Results: **eval exact 15.59%** (step 8), **16.09% peak (step 7)**, train exact 36.33%, train/eval ratio 2.33× (best seen), pass@1000 40.91%. VRAM at batch=512: ~3.6 GB. Monotonic per-step ramp: 0.24% → 5.44% → 11.60% → 13.97% → 15.22% → 16.08% → 16.09% → 15.59%. Peaks at step 7, slight degradation at step 8.
 
-### Energy head training status — trajectory ranking failed for cross-input ranking
-R2 series (R2/R2b/R2c) comprehensively tested trajectory ranking loss for energy head co-training. Key findings:
+All new experiments should scale h=96 unless specifically testing scaling. Checkpoint: `checkpoints/R1-h96-baseline-260414/step_80011.pt` (EMA-saved).
 
-1. **Within-trajectory ranking works perfectly.** Train Spearman ρ → -1.0 across all variants. The energy head learns to rank URM steps (step 6 > step 1) within each puzzle.
-2. **Cross-input ranking completely fails.** Energy pass@K is near zero at all practical K values across all variants (linear, position-aware MLP). The energy head cannot rank predictions from different puzzles/augmentations.
-3. **More energy head capacity makes generalization worse.** Position-aware MLP (R2c) had eval Spearman -0.069 vs linear (R2b) -0.585. More capacity → more training overfitting.
-4. **Energy co-training helps the backbone anyway.** R2c produced best eval exact (6.95%) and Q-halt pass@K despite energy ranking failure. The co-training gradient acts as multi-task regularization.
-5. **The problem is the training signal, not the architecture.** Trajectory ranking teaches within-trajectory ordering, which doesn't transfer to cross-input quality discrimination. Alternative eval-time ranking strategies (energy drop, best-step energy) confirmed the features lack discriminative power.
+**h=64 (R1i) is legacy** — 35K params, 5.33% eval exact, 3.9× train/eval. Scaling h=64 → h=96 delivered 2.9× eval exact from 2.2× params. The capacity ceiling at h=64 was real and severe.
 
-The energy head in its current form is useful as a regularizer (multi-task benefit to backbone) but not as a standalone verifier. Future directions: (a) R3 MCMC may provide diverse hidden states that force generalizable features, (b) contrastive loss across puzzles (not just within-trajectory), or (c) accept that Q-halt is the better verification signal and focus on improving URM directly.
+### Scale-dependent findings (h=64 → h=96 inversion)
+The R2 energy-head story at h=64 does NOT transfer to h=96:
+
+1. **R2c inverted at scale.** At h=64, R2c (position_mlp energy head, elw=0.1) beat R1i by +1.6pp via multi-task regularization. At h=96, R2c-h96 LAGS R1-h96 by **−3.81pp** (11.78% vs 15.59%). Train exact also drops (36.3% → 34.0%), so the energy objective is consuming backbone capacity, not trading train for eval. The "structured multi-task regularization" benefit was a capacity-starvation crutch, not a universal mechanism.
+2. **Ablation series A (A1/A2/A3) is still valid mechanistically** — random labels (A2) catastrophically destroy h=64 backbone, detach (A3) matches R1i baseline — but all A-series experiments were at h=64 and the conclusions about *strength* of regularization are scale-dependent.
+
+### Energy head training status — ranking noise is the mechanism; cross-trajectory is dead; trained energy function needed for MCMC
+R2/R2b/R2c (h=64) and R2c-h96/R2g-h96/R2i-h96 (h=96) comprehensively tested trajectory ranking loss for energy head co-training. The story is now complete:
+
+1. **Within-trajectory ranking has a step-index shortcut.** The head learns "step 6 > step 1" without inspecting hidden state quality. Train Spearman → −1.0, eval Spearman ≈ 0 at h=96 (+0.007). A3 (detach) confirmed: when gradient flow is blocked, eval Spearman is *better* (−0.264) — coupling drags the head toward step-identity features.
+2. **Scale does not break the shortcut.** h=64 → h=96 made eval Spearman *worse* (−0.069 → +0.007). More head capacity just overfits the within-trajectory ordering harder.
+3. **Ranking noise breaks the shortcut (R2g-h96).** Adding σ ~ U[0, 0.01] Gaussian noise to hidden states before the energy head scores them (reconstruction path unchanged) drove eval Spearman to **−0.227** — the first meaningful cross-input generalization in the project. Backbone cost 13.59% vs R1-h96's 15.59% (−2.0pp); energy pass@100 reached 5.84% but still below Q-halt's 31.82%. R2g is the mechanism; elw/σ sweeps at h=96 are the obvious next step if the energy head matters.
+4. **Cross-trajectory ranking fails due to train/eval distribution mismatch (R2i-h96).** `puzzle_dataset._sample_batch` fills each training batch with 512 augmentations of ONE puzzle. Cross-trajectory ranking teaches within-puzzle augmentation discrimination, which anti-aligns with cross-puzzle eval ranking (eval Spearman +0.118, worse than R2c-h96). Clean negative result — structural shortcut removal without distribution matching is not enough. Fixing requires dataloader re-plumbing.
+5. **Q-halt cannot serve as an energy function for MCMC (R3-diag).** Eval-only MCMC using `∂q_head(transformer(h + input_emb))/∂h` on R1-h96 shows: (a) no condition improves over URM-M exact accuracy (best delta +0.0001), (b) Q-halt is adversarially optimizable — at step_size=1.0 normalized, q shifts from −3.749 to +5.368 (sigmoid 0.023 → 0.996) while exact accuracy *drops*. Q-halt's gradient direction is orthogonal or adversarial to lm_head's decoding direction. A trained energy function with MCMC in the loop (second-order grads, dual reconstruction loss) is required.
+
+**Implication for R3:** R3 must train a dedicated energy head *with MCMC in the training loop* (create_graph=True for second-order grads; dual reconstruction loss on both pre-MCMC and post-MCMC states). Reusing Q-halt as energy does not work. The EBT refinement mode in `models/urm/urm_energy.py` (`_mcmc_step`, `compute_joint_energy`) is the existing scaffolding for this.
 
 ## Setup
 

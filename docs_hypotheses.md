@@ -789,7 +789,29 @@ Success criteria:
 3. Energy pass@100 > 10% (first practical cross-input energy ranking)
 
 ### Result
-TBD
+**Ranking noise partially works — first-ever meaningful cross-input energy generalization.** 79,650 params. Runtime: 4h 40m.
+
+| Step | Exact Acc |
+|------|-----------|
+| 1 | 0.29% |
+| 2 | 3.29% |
+| 3 | 10.27% |
+| 4 | 12.83% |
+| 5 | 13.62% |
+| 6 | **13.88%** |
+| 7 | 13.82% |
+| 8 | 13.59% |
+
+Train exact: 32.62%. Train/eval ratio: 2.40× (nearly matches R1-h96's 2.33×, much better than R2c-h96's 2.88×). pass@K (Q-halt): 16.23% @1, 28.57% @10, 31.82% @100, 37.01% @1000. Energy pass@K: 0 @1, 0 @5, 0 @10, **5.84% @100**, 25.97% @1000. Train Spearman: −0.958. **Eval Spearman: −0.227** (vs R2c-h96's +0.007).
+
+**Success criterion scorecard:**
+- ✅ Eval Spearman < −0.2 (achieved −0.227 — the mechanism works)
+- ❌ Eval exact ≥ 14% (achieved 13.59%, missed by 0.4pp)
+- ❌ Energy pass@100 > 10% (achieved 5.84%, short of the "practical ranking" bar)
+
+**Interpretation:** Ranking noise is directionally correct and measurably breaks the step-index shortcut — the first energy head in the project with meaningful negative eval Spearman at h=96. But at σ=0.01 / elw=0.05 the backbone still pays −2.0pp vs R1-h96 (on training capacity, not overfitting — train exact also drops from 36.3% to 32.6%), and the ranking precision is still well below Q-halt. Energy pass@K stays below practical reranking thresholds because the negative Spearman is weak (−0.23 vs Q-halt's implicit strong ordering).
+
+**What this unlocks:** A tighter elw sweep (0.02, 0.03, 0.05-done, 0.075) at h=96 should find a setting where the backbone recovers to R1-h96 levels while preserving the negative Spearman. A σ sweep (0.005, 0.01-done, 0.02, 0.03) could sharpen the ranking at the cost of more backbone noise. R2g is the most promising energy-head follow-up in the R2 series.
 
 ---
 
@@ -822,7 +844,33 @@ Hypothesis: Cross-trajectory pairs force the energy head to learn quality featur
 Success criteria: same as R2g-h96.
 
 ### Result
-TBD
+**Cross-trajectory-only fails via train/eval distribution mismatch — eval Spearman +0.118 (anti-aligned).** 79,650 params. Runtime: 4h 40m.
+
+| Step | Exact Acc |
+|------|-----------|
+| 1 | 0.21% |
+| 2 | 3.69% |
+| 3 | 10.08% |
+| 4 | 11.38% |
+| 5 | 12.46% |
+| 6 | **12.84%** |
+| 7 | 12.57% |
+| 8 | 11.99% |
+
+Train exact: 33.40%. Train/eval ratio: 2.79×. pass@K (Q-halt): 18.18% @1, 29.87% @10, 34.42% @100, 37.01% @1000. Energy pass@K: 0 @1, 0 @5, 0 @10, **2.60% @100**, 17.53% @1000. Train cross_traj_active_pairs per forward: 962K. Train cross_traj_quality_std per forward: 0.113. Eval cross_traj_active_pairs: 807K. Eval cross_traj_quality_std: 0.065. **Eval Spearman: +0.118** (worse than R2c-h96's +0.007 — the head is anti-aligned with eval quality).
+
+**Mechanism working but misdirected.** All diagnostic evidence shows the cross-trajectory mechanism ran as designed: within_active_pairs = 0 (within-trajectory correctly disabled), cross_traj_active_pairs ≈ 962K/forward at train and 807K at eval, cross_traj_quality_std > 0 at both train and eval (there IS real quality variance across augmentations to train on). Train-time diagnostics look fine. The problem is not implementation — it's distribution.
+
+**Root cause: train ≠ eval distribution for the energy head.** `puzzle_dataset._sample_batch` fills each *training* batch with 512 augmentations of one puzzle. Cross-trajectory ranking teaches the head "within this puzzle's augmentation family, which augmentation is better-solved at this step?" — features that discriminate rotations/reflections of one specific puzzle can be highly puzzle-specific. Eval batches, however, contain heterogeneous puzzles, and `energy_accuracy_spearman` ranks across *different* inputs. The features the head learned (within-puzzle augmentation discriminators) do not transfer to cross-puzzle quality discrimination, and at +0.118 they actively *anti*-align.
+
+**Success criterion scorecard:**
+- ❌ Eval exact ≥ 14% (achieved 11.99%, essentially tied with R2c-h96's 11.78%)
+- ❌ Eval Spearman < −0.2 (achieved +0.118 — worse than baseline R2c-h96)
+- ❌ Energy pass@100 > 10% (achieved 2.60% — regression from R2c-h96's 4.55%)
+
+**Interpretation:** Cross-trajectory ranking is a **clean negative result** for the paper. It demonstrates that structural shortcut removal is insufficient when the training distribution is narrower than the eval distribution. Fixing the distribution mismatch requires re-plumbing `_sample_batch` to mix multiple puzzles per training batch, which (a) halves effective examples-per-puzzle and (b) is a substantial data pipeline change. The elw=0.1 bump (based on the "cross-traj gradients are constructive" hypothesis) did not help — train exact also dropped by 2.9pp vs R1-h96, confirming cross-traj gradients are no more constructive than within-trajectory gradients when the train distribution is wrong.
+
+**Comparison to R2g-h96**: maps cleanly to the interpretation matrix row "noise works, cross-traj doesn't" → R2g is the mechanism for breaking the shortcut. Cross-trajectory is dead without a dataloader change.
 
 ---
 

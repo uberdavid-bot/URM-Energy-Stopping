@@ -1,37 +1,30 @@
 #!/bin/bash
-# R4 backbone experiments — three tasks run sequentially overnight.
+# R4 backbone experiments — pivoted after failure mode analysis.
+#
+# Failure mode analysis on R1-h96 (complete, see logs/failure_modes_R1h96.txt):
+#   84% of wrong predictions are OSCILLATING (step-8 delta_norm > 0.003)
+#   0% are stuck (wrong + converged)
+#   88% of wrong predictions don't fire Q-halt (Q-halt well-calibrated)
+#
+# Implication: registers (stuck-in-minima targeting) and multi-register Q-halt
+# were dropped. Two experiments remain that address oscillation directly.
 #
 # Sequence:
-#   1. Failure mode analysis on latest R1-h96 checkpoint (~30 min)
-#   2. R4a: 4 registers at h=96 (~10h)
-#   3. R4b: Exclusive self-attention at h=96 (~10h, possibly ~12h due to SDPA fallback)
+#   1. R4b: Exclusive self-attention at h=96 (~10-12h via SDPA fallback)
+#   2. R4c: loops=16 at h=96 (~20-22h, 2x forward compute per step)
 #
-# Baseline: R1-h96 (15.59% eval exact, 40.91% pass@1000)
-# Success criterion for R4a/R4b: eval exact > 16.1% (baseline step-6 peak)
+# Baseline: R1-h96 (15.59% eval exact, 40.91% pass@1000, step-6 peak 16.09%)
+# Success criterion: Eval exact > 16.1% for either experiment.
+# Diagnostic value of R4c (independent of accuracy): is step-16 delta_norm
+# substantially smaller than step-8? If yes, refinement is the bottleneck.
+# If no, oscillation is a genuine limit cycle and capacity is the bottleneck.
 
 set -e
 
 # Use `conda run -n urm ...` for every python/torchrun invocation so this
 # script can be launched non-interactively (e.g. nohup). `conda activate` does
-# not work in a plain bash -c, and the sibling train scripts assume the user
-# already activated the env in their shell.
+# not work in a plain bash -c.
 CONDA_RUN="conda run -n urm --no-capture-output"
-
-# Find latest R1-h96 checkpoint for failure mode analysis
-R1_H96_CKPT=$(ls -td checkpoints/R1-scale-h96-* checkpoints/R1-h96-* 2>/dev/null | head -1)
-if [ -z "$R1_H96_CKPT" ]; then
-    echo "ERROR: No R1-h96 checkpoint found in checkpoints/"
-    exit 1
-fi
-echo "=== Using R1-h96 checkpoint: $R1_H96_CKPT ==="
-
-# Task 1: Failure mode analysis
-echo "=== [1/3] Failure mode analysis ==="
-$CONDA_RUN python scripts/analyze_failure_modes.py \
-    --checkpoint "$R1_H96_CKPT" \
-    --data_path data/arc1concept-aug-1000-size-10 \
-    --output logs/failure_modes_R1h96.txt
-echo "=== Failure mode analysis complete — see logs/failure_modes_R1h96.txt ==="
 
 COMMON_ARGS="data_path=data/arc1concept-aug-1000-size-10 \
   epochs=31590 \
@@ -49,23 +42,11 @@ COMMON_ARGS="data_path=data/arc1concept-aug-1000-size-10 \
   grad_clip_backbone=5.0 \
   +ema=True"
 
-# Task 2: R4a registers
-run_name="R4a-registers-h96-$(date +%y%m%d)"
-checkpoint_path="checkpoints/${run_name}"
-mkdir -p $checkpoint_path
-echo "=== [2/3] R4a: 4 registers at h=96 ==="
-DISABLE_COMPILE=1 $CONDA_RUN torchrun --nproc-per-node 1 pretrain.py \
-  arch=urm_r4a_registers_h96 \
-  $COMMON_ARGS \
-  +run_name=$run_name \
-  +checkpoint_path=$checkpoint_path
-echo "=== R4a complete ==="
-
-# Task 3: R4b XSA
+# [1/2] R4b: Exclusive self-attention
 run_name="R4b-xsa-h96-$(date +%y%m%d)"
 checkpoint_path="checkpoints/${run_name}"
 mkdir -p $checkpoint_path
-echo "=== [3/3] R4b: XSA at h=96 ==="
+echo "=== [1/2] R4b: XSA at h=96 ==="
 DISABLE_COMPILE=1 $CONDA_RUN torchrun --nproc-per-node 1 pretrain.py \
   arch=urm_r4b_xsa_h96 \
   $COMMON_ARGS \
@@ -73,5 +54,20 @@ DISABLE_COMPILE=1 $CONDA_RUN torchrun --nproc-per-node 1 pretrain.py \
   +checkpoint_path=$checkpoint_path
 echo "=== R4b complete ==="
 
+# [2/2] R4c: loops=16
+run_name="R4c-loops16-h96-$(date +%y%m%d)"
+checkpoint_path="checkpoints/${run_name}"
+mkdir -p $checkpoint_path
+echo "=== [2/2] R4c: loops=16 at h=96 ==="
+DISABLE_COMPILE=1 $CONDA_RUN torchrun --nproc-per-node 1 pretrain.py \
+  arch=urm_r4c_loops16_h96 \
+  $COMMON_ARGS \
+  +run_name=$run_name \
+  +checkpoint_path=$checkpoint_path
+echo "=== R4c complete ==="
+
 echo "=== All R4 experiments complete ==="
-echo "Compare wandb runs: R1-h96 baseline vs R4a-registers-h96 vs R4b-xsa-h96"
+echo "Key R4c metrics to check on wandb:"
+echo "  - all.step_8_delta_norm vs all.step_16_delta_norm (does it decay?)"
+echo "  - all.step_N_exact_accuracy across steps 8-16 (does accuracy climb?)"
+echo "  - Final eval exact vs R1-h96 baseline (16.09% step-6 peak)"

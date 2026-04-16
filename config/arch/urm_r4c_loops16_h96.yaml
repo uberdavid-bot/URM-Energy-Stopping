@@ -1,0 +1,33 @@
+# R4c: Doubled refinement budget at h=96 (loops=16)
+# Identical to R1-h96 baseline except loops=16 and min_steps=16.
+# Zero code changes (loops is already config-driven in forward_trajectory).
+# Diagnostic for oscillation: does more refinement converge or keep flailing?
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+  energy_loss_weight: 0.0
+  ranking_margin: 0.1
+
+loops: 16
+num_layers: 1
+hidden_size: 96
+num_heads: 4
+expansion: 2
+
+attn_dropout: 0.1
+mlp_dropout: 0.1
+recurrence_noise: 0.0
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+energy_threshold: 0.005
+min_steps: 16
+
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+
+ema: True
+ema_rate: 0.999

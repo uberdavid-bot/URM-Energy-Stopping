@@ -1030,22 +1030,40 @@ Train exact: 32.03%. Train/eval ratio: 2.44×. pass@1: 16.88%, pass@100: 35.71%,
 
 ### Experiment R4 — Backbone architecture probes at h=96
 
-Motivation: R2/R3 concluded that energy-based refinement cannot compete with transformer recurrence at matched compute. Next question: does the URM backbone itself have headroom from well-known attention/token augmentations? Two orthogonal probes, both kicked off after a failure mode bucketing pass on R1-h96 (Stuck / Oscillating / Halted-early / Other) that informs which mechanism each architectural change targets.
+Motivation: R2/R3 concluded that energy-based refinement cannot compete with transformer recurrence at matched compute. Next question: does the URM backbone itself have headroom?
 
-### R4a — Learnable register tokens
-Config: `config/arch/urm_r4a_registers_h96.yaml`. 4 register tokens inserted between puzzle_emb and input_tokens (layout: `[puzzle_emb (P), registers (R=4), input_tokens (seq_len)]`). Q-halt unchanged (reads position 0 = puzzle_emb). lm_head outputs only over input positions (slice `[:, P+R:]`). RoPE buffer extended to `2*seq_len + P + 2*R` to cover the energy concat path.
-Hypothesis: extra scratchpad capacity allows multi-step refinement to escape local minima where the current architecture is stuck (pending confirmation from failure mode analysis — bucket-2 dominance is the precondition).
-Success criterion: eval exact > 16.1% (R1-h96 step-7 peak).
-Inspired by: Darcet et al. 2023 (Vision Transformers Need Registers).
+**Failure mode analysis (pre-experiment diagnostic, complete).** Bucketed all R1-h96 eval items:
+- Correct: 16.08%
+- Oscillating (wrong + step-8 delta_norm > 0.003): 83.92%
+- Stuck (wrong + converged, qhalt didn't fire): ~0%
+- Halted early (wrong + qhalt fired): small
+- 88% of wrong predictions correctly don't fire Q-halt — Q-halt is well-calibrated
+- Top ~20 puzzles wrong on ~2000 augs each (systematically un-learned patterns)
+
+See `logs/failure_modes_R1h96.txt`. This diagnosis redirected the R4 plan: oscillation, not stuck-minima, is the dominant failure mode.
+
+### R4a — Learnable register tokens [SKIPPED]
+Config: `config/arch/urm_r4a_registers_h96.yaml` (committed but not run).
+Mechanism: extra scratchpad capacity to escape local minima.
+Rationale for skipping: Failure mode analysis showed ~0% of wrong predictions are stuck-in-minima. The mechanism registers target doesn't match the observed failure distribution. Code changes retained (num_registers defaults to 0, no-op) as documented architectural option for future work.
+
+### R4b — Exclusive self-attention (XSA)
+Config: `config/arch/urm_r4b_xsa_h96.yaml`. Self-attention diagonal masked (a_ii = -inf); each token attends exclusively to other tokens.
+Hypothesis: removing self-attention concentration allows attention heads to do more context-integration work per step, sharpening hidden state representations. Softer motivation post-failure-mode-analysis (still plausibly attacks self-reinforcing attention patterns that could drive oscillation).
+Success criterion: eval exact > 16.1%.
+Implementation: SDPA fallback (flash_attn doesn't support arbitrary masks). ~10-20% throughput hit acceptable at this scale. No registers (clean isolation: test XSA independently first).
 
 ### Result
 TBD
 
-### R4b — Exclusive self-attention (XSA)
-Config: `config/arch/urm_r4b_xsa_h96.yaml`. Self-attention diagonal masked (a_ii = -inf); each token attends exclusively to other tokens.
-Hypothesis: removing self-attention concentration allows attention heads to do more context-integration work per step, sharpening hidden state representations. Plausibly compounds across recurrence steps.
-Success criterion: eval exact > 16.1%.
-Implementation: SDPA fallback (flash_attn doesn't support arbitrary masks). ~10-20% throughput hit acceptable at this scale. No registers (clean isolation: test XSA independently first).
+### R4c — Doubled refinement budget (loops=16)
+Config: `config/arch/urm_r4c_loops16_h96.yaml`. Identical to R1-h96 baseline except loops=16 (was 8) and min_steps=16. Zero code changes.
+Hypothesis: If oscillation at step 8 is slow-convergence (refinement-limited), doubling the budget should contract delta norms and lift accuracy. If oscillation is a genuine limit cycle (capacity-limited), step-16 behavior will mirror step-8 and accuracy will plateau.
+Expected outcomes (diagnostic, not pass/fail):
+  - Convergence scenario: step-16 delta_norm < 0.001, eval exact > 20%
+  - Limit-cycle scenario: step-16 delta_norm ≈ step-8 delta_norm, accuracy flat
+  - Mixed: partial decay, modest accuracy gain
+Runtime note: ~20-22h at loops=16 (vs ~10-12h at loops=8). Primary diagnostic (delta_norm trajectory) visible at first eval (~1.5h), so early kill is viable if the limit-cycle scenario is clearly in play.
 
 ### Result
 TBD

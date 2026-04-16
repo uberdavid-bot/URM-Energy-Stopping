@@ -24,6 +24,8 @@ class ARCModelConfig(BaseModel):
     mlp_dropout: float = 0.0
     # R4a: number of learnable register tokens inserted between puzzle_emb and input
     num_registers: int = 0
+    # R4b: mask attention diagonal so each token attends exclusively to others
+    exclusive_attention: bool = False
     # Additive Gaussian noise stddev applied to hidden states after each URM recurrence pass (training only)
     recurrence_noise: float = 0.0
     rms_norm_eps: float = 1e-5
@@ -63,6 +65,7 @@ class ARCBlock(nn.Module):
             num_key_value_heads=config.num_heads,
             causal=False,
             attn_dropout=config.attn_dropout,
+            exclusive_attention=config.exclusive_attention,
         )
         self.mlp = ConvSwiGLU(
             hidden_size=config.hidden_size,

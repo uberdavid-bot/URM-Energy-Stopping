@@ -96,7 +96,8 @@ class RotaryEmbedding(nn.Module):
         return self.cos_cached, self.sin_cached
 
 class Attention(nn.Module):
-    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False, attn_dropout=0.0):
+    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False, attn_dropout=0.0,
+                 exclusive_attention=False):
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -105,6 +106,7 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.num_key_value_heads = num_key_value_heads
         self.causal = causal
+        self.exclusive_attention = exclusive_attention
 
         self.attn_dropout = attn_dropout
 
@@ -128,10 +130,34 @@ class Attention(nn.Module):
             cos, sin = cos_sin
             query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-        # flash attn
-        attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal, dropout_p=self.attn_dropout if self.training else 0.0)
-        if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
-            attn_output = attn_output[0]
+        if self.exclusive_attention:
+            # R4b: SDPA with diagonal mask. flash_attn does not accept arbitrary masks,
+            # so we fall back to scaled_dot_product_attention. Each token attends
+            # exclusively to other tokens (a_ii = 0). Causal flag is honored only
+            # additively here — exclusive_attention currently assumes non-causal.
+            # Reshape [bs, seq_len, n_heads, head_dim] -> [bs, n_heads, seq_len, head_dim]
+            query_t = query.transpose(1, 2)
+            key_t = key.transpose(1, 2)
+            value_t = value.transpose(1, 2)
+            if self.num_key_value_heads != self.num_heads:
+                repeat = self.num_heads // self.num_key_value_heads
+                key_t = key_t.repeat_interleave(repeat, dim=1)
+                value_t = value_t.repeat_interleave(repeat, dim=1)
+            mask = torch.zeros(seq_len, seq_len, device=query.device, dtype=query.dtype)
+            mask.fill_diagonal_(float("-inf"))
+            attn_output = F.scaled_dot_product_attention(
+                query_t, key_t, value_t,
+                attn_mask=mask,
+                dropout_p=self.attn_dropout if self.training else 0.0,
+                is_causal=False,
+            )
+            # [bs, n_heads, seq_len, head_dim] -> [bs, seq_len, n_heads * head_dim]
+            attn_output = attn_output.transpose(1, 2).contiguous()
+        else:
+            # flash attn
+            attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal, dropout_p=self.attn_dropout if self.training else 0.0)
+            if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
+                attn_output = attn_output[0]
 
         # attn_output: [batch_size, num_heads, seq_len, head_dim]
         attn_output = attn_output.view(batch_size, seq_len, self.output_size)  # type: ignore

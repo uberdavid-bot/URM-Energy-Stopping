@@ -995,12 +995,45 @@ Failure mode C (instability): NaN or divergent training — second-order grads a
 Risk: 10× step size means the energy head's gradient is sent through a 10× louder signal, which could destabilize training. Mitigations: grad clip at 1.0 on energy head params, randomized step size during training, Langevin noise, `ema_rate=0.999` for eval.
 
 ### Result
-TBD
+**Clean negative: energy landscape descends correctly but orthogonally to decoding quality. MCMC at step_size=0.1 produces meaningful hidden perturbations but zero accuracy improvement.** 76,610 params. Runtime: 12h 11m.
+
+Per-step exact accuracy (final eval, step 80K):
+
+| Step | Exact Acc | Phase |
+|------|-----------|-------|
+| 1 | 0.31% | URM |
+| 2 | 3.24% | URM |
+| 3 | 10.54% | URM |
+| 4 | 12.97% | URM |
+| 5 | **13.15%** | URM endpoint |
+| 6 | 13.14% | MCMC |
+| 7 | 13.14% | MCMC |
+| 8 | 13.13% | MCMC |
+
+Train exact: 32.03%. Train/eval ratio: 2.44×. pass@1: 16.88%, pass@100: 35.71%, pass@1000: 38.31%. Energy pass@100: 3.25%, energy pass@1000: 20.13%. `mcmc_improvement = −0.000204` (−0.02%, 17 puzzles worse). `energy_decrease = −0.158` (monotonic at all 15 evals).
+
+**Success criterion scorecard:**
+- ❌ mcmc_improvement > 0 (achieved −0.02% — slightly negative, not improving)
+- ❌ Eval exact ≥ 16.09% (achieved 13.15% — 2.94pp below R1-h96 peak, backbone capacity cost)
+- ✅ No training instability (clean 80K run, no NaN)
+- ✅ Energy landscape monotonically descending at every eval (energy_decrease −0.145 to −0.158)
+- ✅ MCMC delta_norm = 0.10 ≈ step_size (meaningful perturbation at 7% of URM magnitude)
+
+**Failure mode: A (orthogonal landscape).** Energy descent ≠ decoding improvement. mcmc_improvement oscillated across 15 evals: 4 positive, 9 negative, median −0.016%. The energy head learns to minimize a function of hidden states, but the minimum-energy direction in the 96-dim hidden space does not point toward better lm_head argmax. This is not adversarial (would show large negative mcmc_improvement) — it's orthogonal (small random perturbation effect).
+
+**Backbone cost:** R3b's URM (13.15% step 5) lags R1-h96 (15.59% step 8, 16.09% peak at step 7) by 2.94pp. The second-order gradient signal from MCMC steps consumes backbone capacity. Energy co-training is a net negative: backbone pays 2.94pp cost, MCMC provides no compensating accuracy improvement. Compare to R2c-h96 where energy co-training also cost backbone accuracy (−3.81pp vs R1-h96 at h=96) — the "structured multi-task regularization" benefit seen at h=64 does not survive at h=96 regardless of training method.
+
+**What R3 + R3b prove together:**
+1. `create_graph=True` through MCMC successfully trains the energy head to produce a descending landscape (R3 at step_size=0.01 showed −0.008 descent, R3b at 0.1 showed −0.158 descent — both strictly monotonic at every eval).
+2. The descent direction is not aligned with reconstruction quality at either step size. At 0.01: updates are too small to test (R3's metric bug finding). At 0.1: updates are meaningful (delta_norm = 0.1, 7% of URM magnitude) but don't flip argmax in the quality-improving direction.
+3. The energy head, even when co-adapted to its own gradient through second-order training, does not learn a landscape where gradient descent in hidden space improves lm_head decoding. The fundamental obstacle is that the energy surface and the reconstruction quality surface are different functions of hidden states with different critical points.
 
 ---
 
 ## Lessons Carried Forward
 1. **Dual reconstruction loss is mandatory** for MCMC training (Exp 3a).
+14. **Energy gradient is orthogonal to decoding quality** (R3/R3b). A create_graph-trained energy head learns a monotonically descending landscape, but the descent direction doesn't improve lm_head argmax. MCMC at step_size=0.1 produces 0.1-per-position perturbations that are meaningful in magnitude but neutral-to-negative for accuracy. The energy surface and reconstruction quality surface have different geometries in hidden space.
+15. **Metric aggregation matters** (R3 → R3b). Batch-mean metrics (delta_norm, current_energy) divided by sample-count in pretrain.py were under-reported by ~batch_size (~512×). This caused a multi-hour diagnostic detour (false BF16 underflow hypothesis). Fixed by returning batch-sums instead.
 2. **Contrastive loss alone causes energy collapse** (Exp 1). Use trajectory ranking as primary energy training signal (first-order, R2). MCMC reconstruction provides second-order signal in R3.
 3. **Right-size the model for the problem.** The model must struggle enough that refinement has room to help.
 4. **MCMC must operate in hidden space**, not soft-embedding space.

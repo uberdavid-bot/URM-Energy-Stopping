@@ -11,6 +11,12 @@
 
 set -e
 
+# Use `conda run -n urm ...` for every python/torchrun invocation so this
+# script can be launched non-interactively (e.g. nohup). `conda activate` does
+# not work in a plain bash -c, and the sibling train scripts assume the user
+# already activated the env in their shell.
+CONDA_RUN="conda run -n urm --no-capture-output"
+
 # Find latest R1-h96 checkpoint for failure mode analysis
 R1_H96_CKPT=$(ls -td checkpoints/R1-scale-h96-* checkpoints/R1-h96-* 2>/dev/null | head -1)
 if [ -z "$R1_H96_CKPT" ]; then
@@ -21,7 +27,7 @@ echo "=== Using R1-h96 checkpoint: $R1_H96_CKPT ==="
 
 # Task 1: Failure mode analysis
 echo "=== [1/3] Failure mode analysis ==="
-conda activate urm && python scripts/analyze_failure_modes.py \
+$CONDA_RUN python scripts/analyze_failure_modes.py \
     --checkpoint "$R1_H96_CKPT" \
     --data_path data/arc1concept-aug-1000-size-10 \
     --output logs/failure_modes_R1h96.txt
@@ -48,7 +54,7 @@ run_name="R4a-registers-h96-$(date +%y%m%d)"
 checkpoint_path="checkpoints/${run_name}"
 mkdir -p $checkpoint_path
 echo "=== [2/3] R4a: 4 registers at h=96 ==="
-DISABLE_COMPILE=1 torchrun --nproc-per-node 1 pretrain.py \
+DISABLE_COMPILE=1 $CONDA_RUN torchrun --nproc-per-node 1 pretrain.py \
   arch=urm_r4a_registers_h96 \
   $COMMON_ARGS \
   +run_name=$run_name \
@@ -60,7 +66,7 @@ run_name="R4b-xsa-h96-$(date +%y%m%d)"
 checkpoint_path="checkpoints/${run_name}"
 mkdir -p $checkpoint_path
 echo "=== [3/3] R4b: XSA at h=96 ==="
-DISABLE_COMPILE=1 torchrun --nproc-per-node 1 pretrain.py \
+DISABLE_COMPILE=1 $CONDA_RUN torchrun --nproc-per-node 1 pretrain.py \
   arch=urm_r4b_xsa_h96 \
   $COMMON_ARGS \
   +run_name=$run_name \

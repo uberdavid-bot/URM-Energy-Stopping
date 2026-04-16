@@ -1,0 +1,37 @@
+# R4a: Learnable register tokens at h=96
+# 4 register tokens inserted between puzzle_emb and input_tokens.
+# Q-halt unchanged (reads position 0 = puzzle_emb).
+# lm_head decodes only the input positions (skips P + R prefix).
+# Hypothesis: extra scratchpad capacity helps multi-step refinement escape stuck states.
+# Inspired by Darcet et al. 2023, "Vision Transformers Need Registers".
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+  energy_loss_weight: 0.0
+  ranking_margin: 0.1
+
+loops: 8
+num_layers: 1
+hidden_size: 96
+num_heads: 4
+expansion: 2
+
+attn_dropout: 0.1
+mlp_dropout: 0.1
+recurrence_noise: 0.0
+
+num_registers: 4
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+energy_threshold: 0.005
+min_steps: 8
+
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+
+ema: True
+ema_rate: 0.999

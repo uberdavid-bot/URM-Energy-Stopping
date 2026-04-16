@@ -22,6 +22,8 @@ class ARCModelConfig(BaseModel):
     pos_encodings: str
     attn_dropout: float = 0.0
     mlp_dropout: float = 0.0
+    # R4a: number of learnable register tokens inserted between puzzle_emb and input
+    num_registers: int = 0
     # Additive Gaussian noise stddev applied to hidden states after each URM recurrence pass (training only)
     recurrence_noise: float = 0.0
     rms_norm_eps: float = 1e-5
@@ -106,10 +108,26 @@ class ARCBackbone(nn.Module):
                 cast_to=self.forward_dtype,
             )
 
+        # R4a: learnable register tokens inserted between puzzle_emb and input_tokens.
+        # Initialized at std=1/embed_scale so that the trailing self.embed_scale * embedding
+        # in _input_embeddings rescales them to std~1, matching embed_tokens output.
+        if self.config.num_registers > 0:
+            self.register_emb = nn.Parameter(
+                trunc_normal_init_(
+                    torch.empty(self.config.num_registers, self.config.hidden_size, dtype=self.forward_dtype),
+                    std=embed_init_std,
+                )
+            )
+
+        # compute_joint_energy concatenates input_emb [P + R + seq_len] + output_emb [R + seq_len]
+        # (output_emb = hidden[:, P:] keeps the register slots). Total length = 2*seq_len + P + 2*R.
         self.rotary_emb = RotaryEmbedding(
             dim=self.config.hidden_size // self.config.num_heads,
-            # compute_joint_energy concatenates input_emb [seq_len + puzzle_emb_len] + predicted_emb [seq_len]
-            max_position_embeddings=2 * self.config.seq_len + self.puzzle_emb_len,
+            max_position_embeddings=(
+                2 * self.config.seq_len
+                + self.puzzle_emb_len
+                + 2 * self.config.num_registers
+            ),
             base=self.config.rope_theta,
         )
 
@@ -136,6 +154,17 @@ class ARCBackbone(nn.Module):
                 (puzzle_embedding.view(-1, self.puzzle_emb_len, self.config.hidden_size), embedding),
                 dim=-2,
             )
+
+        # R4a: insert registers between puzzle_emb and input_tokens.
+        # Layout becomes [puzzle_emb (P), registers (R), input_tokens (seq_len)].
+        if self.config.num_registers > 0:
+            B = embedding.shape[0]
+            registers = self.register_emb.unsqueeze(0).expand(B, -1, -1)
+            embedding = torch.cat(
+                (embedding[:, : self.puzzle_emb_len], registers, embedding[:, self.puzzle_emb_len :]),
+                dim=1,
+            )
+
         return self.embed_scale * embedding
 
 
@@ -292,11 +321,12 @@ class ARCModel(nn.Module):
         input_embeddings = self.inner._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
         seq_info = dict(cos_sin=self.inner.rotary_emb())
         P = self.inner.puzzle_emb_len
+        R = self.config.num_registers
 
-        # Initialize hidden state
+        # Initialize hidden state. Layout matches input_embeddings: [P, R, seq_len].
         hidden = self.inner.init_hidden.expand(
             batch["inputs"].shape[0],
-            self.inner.config.seq_len + P, -1
+            self.inner.config.seq_len + P + R, -1
         ).clone()
 
         all_logits = []
@@ -321,7 +351,9 @@ class ARCModel(nn.Module):
                     hidden, input_embeddings, self.config.mcmc_step_size, full_hidden=True
                 )
 
-            logits = self.inner.lm_head(hidden)[:, P:]
+            # lm_head slice skips both puzzle_emb (P) and register (R) prefixes.
+            logits = self.inner.lm_head(hidden)[:, P + R:]
+            # Q-halt reads position 0 (puzzle_emb slot, unchanged by registers).
             q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32).squeeze(-1)
             all_logits.append(logits)
             all_q_logits.append(q_logits)

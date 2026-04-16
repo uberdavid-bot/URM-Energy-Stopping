@@ -1028,6 +1028,28 @@ Train exact: 32.03%. Train/eval ratio: 2.44×. pass@1: 16.88%, pass@100: 35.71%,
 2. The descent direction is not aligned with reconstruction quality at either step size. At 0.01: updates are too small to test (R3's metric bug finding). At 0.1: updates are meaningful (delta_norm = 0.1, 7% of URM magnitude) but don't flip argmax in the quality-improving direction.
 3. The energy head, even when co-adapted to its own gradient through second-order training, does not learn a landscape where gradient descent in hidden space improves lm_head decoding. The fundamental obstacle is that the energy surface and the reconstruction quality surface are different functions of hidden states with different critical points.
 
+### Experiment R4 — Backbone architecture probes at h=96
+
+Motivation: R2/R3 concluded that energy-based refinement cannot compete with transformer recurrence at matched compute. Next question: does the URM backbone itself have headroom from well-known attention/token augmentations? Two orthogonal probes, both kicked off after a failure mode bucketing pass on R1-h96 (Stuck / Oscillating / Halted-early / Other) that informs which mechanism each architectural change targets.
+
+### R4a — Learnable register tokens
+Config: `config/arch/urm_r4a_registers_h96.yaml`. 4 register tokens inserted between puzzle_emb and input_tokens (layout: `[puzzle_emb (P), registers (R=4), input_tokens (seq_len)]`). Q-halt unchanged (reads position 0 = puzzle_emb). lm_head outputs only over input positions (slice `[:, P+R:]`). RoPE buffer extended to `2*seq_len + P + 2*R` to cover the energy concat path.
+Hypothesis: extra scratchpad capacity allows multi-step refinement to escape local minima where the current architecture is stuck (pending confirmation from failure mode analysis — bucket-2 dominance is the precondition).
+Success criterion: eval exact > 16.1% (R1-h96 step-7 peak).
+Inspired by: Darcet et al. 2023 (Vision Transformers Need Registers).
+
+### Result
+TBD
+
+### R4b — Exclusive self-attention (XSA)
+Config: `config/arch/urm_r4b_xsa_h96.yaml`. Self-attention diagonal masked (a_ii = -inf); each token attends exclusively to other tokens.
+Hypothesis: removing self-attention concentration allows attention heads to do more context-integration work per step, sharpening hidden state representations. Plausibly compounds across recurrence steps.
+Success criterion: eval exact > 16.1%.
+Implementation: SDPA fallback (flash_attn doesn't support arbitrary masks). ~10-20% throughput hit acceptable at this scale. No registers (clean isolation: test XSA independently first).
+
+### Result
+TBD
+
 ---
 
 ## Lessons Carried Forward

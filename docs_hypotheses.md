@@ -1091,7 +1091,9 @@ Success criterion: Eval exact > 17% (>1pp over R1-h96 step-6 peak).
 Diagnostic value if null: "no axis of this architecture unlocks further gains on ARC-10×10 at 80K training steps" becomes a strong writeup framing — depth, width, refinement steps, attention variants all tested.
 
 ### Result
-TBD
+**PASS (2026-04-17).** 136,978 params (1.8× R1-h96). Final eval exact **21.25%**, peak **21.44%** at step 7 (+5.66pp over R1-h96's 15.59% final, +5.35pp over R1-h96's step-7 peak of 16.09%). Clears the 17% bar by >4pp. Runtime 2h 05m. Train exact 47.66%, train/eval ratio **2.24×** (slightly compressed vs R1-h96's 2.33×) — the wider model fits train better AND generalizes better. pass@1000 43.51% (+2.60pp), pass@1 24.03% (first pass@1 measurement above 20% in the project). Per-step trajectory shape matches R1-h96 (delta 6.67 → 0.75 over 8 steps, peak at step 7, small decay at step 8); the whole curve is shifted up ~5pp. Q-halt well-calibrated (q_halt_accuracy 86.8%, qhalt_stop_step mean 6.6 = near step-7 peak).
+
+Interpretation: h=96 was the ceiling. The R4b/R4c negatives (XSA neutral, more loops makes it worse) were all symptoms of insufficient per-step capacity, not architectural problems. 1.8× params delivers 36% relative improvement in eval exact with zero algorithmic change.
 
 ### R4e — Width scaling: h=160, loops=8
 
@@ -1102,7 +1104,9 @@ Hypothesis: If width is the correct lever, the eval exact curve continues climbi
 Runtime note: h=160 is ~1.7× the forward compute of h=96. Expect ~2h runtime on the 3090, same 80K steps.
 
 ### Result
-TBD
+**PASS (2026-04-17).** 210,890 params (2.75× R1-h96, 1.54× R4d). Final eval exact **23.72%**, peak **24.09%** at step 6 (+8.13pp over R1-h96, +2.47pp over R4d). Runtime 2h 38m. Train exact **56.25%** (+9pp over R4d), so train/eval ratio widens to **2.37×** — the backbone has more capacity than the train set can usefully consume. pass@1 **27.92%** (+3.89pp over R4d, first pass@1 above 25% in the project). pass@1000 **48.05%** (+7.14pp over R1-h96). pass@100 46.10%. Per-step trajectory: delta 7.64 → 0.95 over 8 steps, peak shifted one step earlier to step 6 (higher-capacity model converges faster). qhalt_stop_step mean 6.21, aligning with the step-6 peak. Q-halt accuracy 83.0% (slightly below R4d's 86.8%).
+
+Scaling-efficiency summary: h=96 → h=128 gave +5.66pp at +1.8× params (3.14pp per doubling). h=128 → h=160 gives +2.47pp at +1.54× params (1.91pp per sub-doubling). Returns are decelerating but still real, pointing to h=192 as the next informative sweep point.
 
 ### R4f — Regularization probe at h=128
 
@@ -1111,6 +1115,59 @@ Motivation: R4c's finding (same train fit, −2.2pp eval, 2.73× train/eval rati
 Config: `config/arch/urm_r4f_h128_regularized.yaml`. Identical to R4d except attn_dropout=0.15, mlp_dropout=0.15, weight_decay=0.15.
 Hypothesis: Higher dropout + weight decay narrows the train/eval gap relative to R4d, with eval exact at least matching R4d (and possibly exceeding it).
 Success criterion: Eval exact > R4d's eval exact OR train/eval ratio < 2.0× with eval exact within 1pp of R4d.
+
+### Result
+**NULL (2026-04-17).** Same 136,978 params as R4d. Final eval exact **20.81%** vs R4d 21.25% (−0.44pp). Peak 21.27% at step 6 vs R4d 21.44% at step 7 (−0.17pp). Train exact 46.09% vs R4d 47.66% (−1.57pp — higher dropout does reduce train fit, as expected). Train/eval ratio **2.22×** vs R4d 2.24× (basically identical). Runtime 2h 05m.
+
+The regularization hypothesis fails: higher dropout + weight decay at h=128 produces the tiny train-fit reduction you'd expect without any eval gain. The train/eval gap at h=128 is not materially regularizable by this knob at this strength.
+
+One informative wrinkle: pass@1000 **45.45%** vs R4d's 43.51% (+1.94pp). Heavier dropout makes per-augmentation predictions more diverse without improving single-shot accuracy — consistent with the dropout-as-stochastic-ensemble view. If the downstream goal is pass@K rather than pass@1, stronger dropout at fixed width is a small free win; if pass@1 is what matters, standard regularization (R4d settings) is better.
+
+### R4 series summary
+
+Width is the lever that works on ARC-10×10 at 80K steps with this architecture. The scaling curve (eval exact): h=96 → 15.59%, h=128 → 21.25%, h=160 → 23.72%. XSA, extended refinement, and heavier regularization all fail to help beyond width. This closes the "is there a cheap architectural win on this backbone" question. The R4c delta-norm diagnostic is retired — wider models have *larger* step-8 delta norms but better accuracy (R4e step-8 delta 0.95, R1-h96 step-8 delta 0.52), so "still moving at step 8" and "converged to correct" are orthogonal.
+
+---
+
+## R5 series — scaling curve completion and single-run strengthening
+
+### R5a — Width scaling: h=192, loops=8
+
+Motivation: R4d/R4e scaling returns are decelerating but still meaningful. h=192 fills the gap between h=160 and the next natural power-of-2 (h=256), adding a third in-trend data point to nail down whether the curve is saturating or still climbing.
+
+Config: `config/arch/urm_r5a_h192.yaml`. Identical to R4d/R4e template except hidden_size=192.
+Hypothesis: Eval exact continues climbing from R4e's 23.72% with positive but further-decelerated slope. If h=192 gains <1pp over h=160, width is saturating at this problem size and 80K-step budget.
+Success criterion: Eval exact > 24.5% (>0.8pp over R4e).
+Diagnostic value if null (eval exact within noise of R4e): "width saturates by h=160 on ARC-10×10" — a concrete ceiling finding for the writeup.
+Runtime note: h=192 ≈ 1.44× the forward memory of h=160. Expect ~3-3.5h at batch 512 on the 3090 (still well within 24GB headroom).
+
+### Result
+TBD
+
+### R5b — Loops=16 at h=128
+
+Motivation: R4c (loops=16 at h=96) showed −2.21pp eval vs R1-h96 with clean delta-norm relaxation — the model polished toward worse fixed points because h=96 had no better ones nearby. R5b re-runs the same extended-refinement diagnostic at h=128. If accuracy climbs with extra steps at h=128, R4c's pathology was specifically h=96 capacity failure; refinement-budget investment becomes viable at larger widths. If it still regresses, something more fundamental about long-refinement is at play.
+
+Config: `config/arch/urm_r5b_h128_loops16.yaml`. Identical to R4d except loops=16, min_steps=16.
+Hypothesis: At h=128, extended refinement produces at least as good eval exact as loops=8 (R4d 21.25%), possibly higher.
+Success criterion: Eval exact > R4d's 21.25% AND step-16 exact > step-8 exact (strict improvement from added steps).
+Partial: Eval exact within 0.5pp of R4d — confirms "loops=16 is not catastrophic at sufficient width" even if no net gain.
+Failure: Eval exact < R4d by >1pp — the R4c pathology generalizes and extra refinement hurts at all widths.
+Runtime note: loops=16 at h=128 ≈ 2× compute per step vs R4d. Expect ~4h.
+
+### Result
+TBD
+
+### R5c — Longer training at h=160
+
+Motivation: R4e's train exact (56.25%) substantially outpaces its eval exact (23.72%), but the train/eval ratio (2.37×) is at parity with R1-h96's 2.33× — the model hasn't overfit, it just hasn't finished training. Extending training past 80K steps tests whether the h=160 curve has headroom to keep climbing. Secondary goal: pass@1 at h=160 is already 27.92% (best pass@1 in the project to date); a longer run is the cleanest way to push that further for a demo/writeup figure.
+
+Config: `config/arch/urm_r5c_h160_long.yaml` — arch identical to R4e. Training hyperparameters modified at command line: epochs=47385 (1.5× R4e's 31590 = 120K optimizer steps) and eval_interval held at 2106 (so ~22 evals across the longer run).
+Hypothesis: Eval exact climbs past R4e's 23.72% with additional training. Train/eval ratio stays near R4e's 2.37× (not collapsing into overfitting).
+Success criterion: Eval exact > 25%.
+Partial: Eval exact within 0.5pp of R4e — saturated, no benefit to extra training.
+Failure: Train/eval ratio widens substantially (>3×) — overfitting regime, indicates 80K was already the right budget at this width.
+Runtime note: 1.5× R4e runtime ≈ 4h on the 3090.
 
 ### Result
 TBD

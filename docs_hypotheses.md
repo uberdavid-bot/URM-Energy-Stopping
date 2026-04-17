@@ -1054,7 +1054,9 @@ Success criterion: eval exact > 16.1%.
 Implementation: SDPA fallback (flash_attn doesn't support arbitrary masks). ~10-20% throughput hit acceptable at this scale. No registers (clean isolation: test XSA independently first).
 
 ### Result
-TBD
+**NULL (2026-04-17).** Final eval exact 15.35% vs R1-h96 baseline 15.59% (−0.24pp). Peak 15.71% at step 6 vs 16.09% at step 7 baseline. pass@1000 drops 1.3pp (39.61% vs 40.91%). Per-step accuracy trajectory shape closely matches R1-h96; peak sits one step earlier and ~0.4pp lower. Delta norms decay 5.28 → 0.52 across 8 steps (same ballpark as baseline). Train exact 33.59% (−2.7pp), eval nearly unchanged — train/eval ratio compresses from 2.33× to 2.19×, so XSA mildly regularizes without lifting eval.
+
+Interpretation: the "self-attention concentration sharpens hidden states" hypothesis is unsupported at this scale. Removing the attention diagonal neither helps nor meaningfully hurts — self-loops were not load-bearing in URM refinement on 10×10 ARC. Runtime 1h48m (13.4 it/s) — SDPA fallback cost was smaller than expected (~7% vs flash_attn).
 
 ### R4c — Doubled refinement budget (loops=16)
 Config: `config/arch/urm_r4c_loops16_h96.yaml`. Identical to R1-h96 baseline except loops=16 (was 8) and min_steps=16. Zero code changes.
@@ -1064,6 +1066,51 @@ Expected outcomes (diagnostic, not pass/fail):
   - Limit-cycle scenario: step-16 delta_norm ≈ step-8 delta_norm, accuracy flat
   - Mixed: partial decay, modest accuracy gain
 Runtime note: ~20-22h at loops=16 (vs ~10-12h at loops=8). Primary diagnostic (delta_norm trajectory) visible at first eval (~1.5h), so early kill is viable if the limit-cycle scenario is clearly in play.
+
+### Result
+**Diagnostic null (2026-04-17), with a more interesting finding than expected.** Final eval exact 13.38%, peak 13.89% at step 13 vs R1-h96 baseline 15.59% (−2.21pp final, peak-to-peak −2.20pp).
+
+The diagnostic itself was unambiguous — delta norms decayed monotonically across all 16 steps:
+`5.32 → 3.23 → 2.09 → 1.46 → 1.07 → 0.82 → 0.64 → 0.51 → 0.42 → 0.34 → 0.29 → 0.25 → 0.21 → 0.19 → 0.17`
+
+At step 16, delta_norm is 0.17 — **30× smaller than R1-h96's step-8 value of 0.52**, which the failure mode analysis had labeled "oscillating" (threshold > 0.003). This overturns the oscillation framing. The hidden state was not cycling; it was slowly relaxing toward a fixed point. The step-8 threshold was too tight given the natural relaxation timescale of this architecture.
+
+Q-halt tracked the per-trajectory peak correctly (mean qhalt_stop_step=13.45, matching the step-13 peak). Q-halt is doing its job — the peak is just in a worse place.
+
+Train/eval signature: train exact 36.52% ≈ R1-h96's 36.33% (matched), eval 13.38% vs 15.59% (−2.21pp). Train/eval ratio widens 2.33× → 2.73×. The model learns the training distribution as well as R1-h96 did, then spends the extra 8 refinement steps relaxing toward a fixed point that generalizes worse.
+
+Revised interpretation: URM on ARC-10×10 relaxes smoothly toward fixed points. At h=96 those fixed points are systematically wrong on held-out puzzles the model didn't learn patterns for. Additional refinement budget doesn't find correct attractors — it polishes representations toward wrong ones, on eval. This reframes R1-h96's failure mode as "slow relaxation to wrong basins" rather than "oscillation," and points the next experiment at width (R4d) rather than step budget.
+
+### R4d — Width scaling: h=128, loops=8
+
+Motivation: R4c showed h=96 is not refinement-limited — delta norms contract cleanly with more loops. Generalization collapses instead. The canonical next lever is width. h=128 matches the capacity of Exp 0's original baseline (which hit 15.9% composite at 10K steps, before deep supervision was introduced) — this tests whether h=128 + deep supervision + dropout lifts the ceiling R1-h96 is sitting on.
+
+Config: `config/arch/urm_r4d_h128.yaml`. d=1, h=128, exp=2, loops=8, dropout=0.1 (attn+mlp), weight_decay=0.1 — all identical to R1-h96 except hidden_size=128.
+Hypothesis: At h=128, per-step representations have enough capacity that the generalizing fixed point is meaningfully closer to the correct fixed point on eval. Eval exact should exceed 16.1%.
+Success criterion: Eval exact > 17% (>1pp over R1-h96 step-6 peak).
+Diagnostic value if null: "no axis of this architecture unlocks further gains on ARC-10×10 at 80K training steps" becomes a strong writeup framing — depth, width, refinement steps, attention variants all tested.
+
+### Result
+TBD
+
+### R4e — Width scaling: h=160, loops=8
+
+Motivation: Conditional on R4d. If h=128 helps, a further width bump establishes the scaling trend. If h=128 doesn't help, R4e runs anyway for the blog post — two width points make "width doesn't help" a stronger claim than one.
+
+Config: `config/arch/urm_r4e_h160.yaml`. Identical to R4d except hidden_size=160.
+Hypothesis: If width is the correct lever, the eval exact curve continues climbing from R4d.
+Runtime note: h=160 is ~1.7× the forward compute of h=96. Expect ~2h runtime on the 3090, same 80K steps.
+
+### Result
+TBD
+
+### R4f — Regularization probe at h=128
+
+Motivation: R4c's finding (same train fit, −2.2pp eval, 2.73× train/eval ratio) looks like generalization collapse under extended inference-time refinement. This could be addressed by stronger regularization at train time even without changing the refinement schedule. Tests whether the h=128 backbone responds to higher dropout and weight decay — if yes, the R4c story is "fixed by regularization" and future experiments should sweep those knobs before (or alongside) scaling width.
+
+Config: `config/arch/urm_r4f_h128_regularized.yaml`. Identical to R4d except attn_dropout=0.15, mlp_dropout=0.15, weight_decay=0.15.
+Hypothesis: Higher dropout + weight decay narrows the train/eval gap relative to R4d, with eval exact at least matching R4d (and possibly exceeding it).
+Success criterion: Eval exact > R4d's eval exact OR train/eval ratio < 2.0× with eval exact within 1pp of R4d.
 
 ### Result
 TBD

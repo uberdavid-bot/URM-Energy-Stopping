@@ -1142,7 +1142,14 @@ Diagnostic value if null (eval exact within noise of R4e): "width saturates by h
 Runtime note: h=192 ≈ 1.44× the forward memory of h=160. Expect ~3-3.5h at batch 512 on the 3090 (still well within 24GB headroom).
 
 ### Result
-TBD
+**PASS (marginal, 2026-04-17).** 300,674 params (1.43× R4e). Final eval exact **24.64%**, peak **24.86%** at step 7 (+0.92pp final / +0.77pp peak-to-peak over R4e). Clears the 24.5% bar at final step and exceeds at peak. Train exact 61.52% (+5.27pp over R4e), train/eval ratio **2.50×** (vs R4e 2.37×, R1-h96 2.33×) — starting to widen. pass@1 **29.22%** (+1.30pp), pass@1000 **53.25%** (+5.20pp). Delta norms 8.52 → 1.22 over 8 steps, still moving at step 8 (peak at step 7). qhalt_stop_step mean 6.03, slightly early vs step-7 peak. Runtime 3h 03m.
+
+Scaling-efficiency summary (eval exact, per ~doubling of params):
+- h=96 → h=128 (+1.8×): +5.66pp (3.14pp/doubling)
+- h=128 → h=160 (+1.54×): +2.47pp (1.91pp/sub-doubling)
+- h=160 → h=192 (+1.43×): +0.92pp (0.73pp/sub-doubling equivalent)
+
+Returns are clearly decelerating. pass@1000 gains haven't decelerated as fast (+7.14pp, +5.20pp, +5.20pp at the three steps), suggesting the capacity headroom for voting/diverse answers outlasts the capacity headroom for single-shot accuracy. One more width point (h=256) would establish whether single-shot saturates fully; current data suggests the returns drop below 0.5pp by h=256.
 
 ### R5b — Loops=16 at h=128
 
@@ -1156,13 +1163,19 @@ Failure: Eval exact < R4d by >1pp — the R4c pathology generalizes and extra re
 Runtime note: loops=16 at h=128 ≈ 2× compute per step vs R4d. Expect ~4h.
 
 ### Result
-TBD
+**Diagnostic: R4c pathology is real and width-modulated, not width-cured (2026-04-17).** Final eval exact **20.40%** vs R4d 21.25% (−0.85pp). Peak **20.86%** at step 12 vs R4d 21.44% at step 7 (−0.58pp). Fails both the primary success criterion and the partial criterion (drops more than 0.5pp). Train exact **57.23%** (+9.57pp over R4d — more training fit from more refinement steps), train/eval ratio widens to **2.81×** vs R4d 2.24×. Delta norms decay monotonically 6.68 → 0.25. qhalt_stop_step mean 12.31 (correctly tracks the step-12 peak). Runtime 3h 55m.
+
+Same qualitative shape as R4c: smooth delta-norm relaxation, accuracy peaks mid-trajectory (step 12 here, step 13 at h=96), mild degradation into more refinement steps, train/eval ratio widens. The drop magnitude shrank with width (−2.21pp at h=96, −0.85pp at h=128), so there's a width-mitigation factor — probably because wider fixed points are closer to correct answers so the "polishing drift" costs less. But the phenomenon itself survives.
+
+Interesting side finding: pass@1000 **46.75%** vs R4d 43.51% (+3.24pp). Extended refinement hurts pass@1 but helps pass@K, similar to the R4f dropout result — extra degrees of freedom in the trajectory produce more diverse correct candidates even as they hurt single-shot accuracy.
+
+**Conclusion: loops=16 is not a viable lever at any width tested.** The URM+deep-supervision training signal under these settings systematically produces fixed points worse than the natural peak at step 6-8. Future loops-sweeps should stay in the [6, 10] range unless a structural change (e.g. trajectory-aware regularization) is added.
 
 ### R5c — Longer training at h=160
 
 Motivation: R4e's train exact (56.25%) substantially outpaces its eval exact (23.72%), but the train/eval ratio (2.37×) is at parity with R1-h96's 2.33× — the model hasn't overfit, it just hasn't finished training. Extending training past 80K steps tests whether the h=160 curve has headroom to keep climbing. Secondary goal: pass@1 at h=160 is already 27.92% (best pass@1 in the project to date); a longer run is the cleanest way to push that further for a demo/writeup figure.
 
-Config: `config/arch/urm_r5c_h160_long.yaml` — arch identical to R4e. Training hyperparameters modified at command line: epochs=47385 (1.5× R4e's 31590 = 120K optimizer steps) and eval_interval held at 2106 (so ~22 evals across the longer run).
+Config: `config/arch/urm_r5c_h160_long.yaml` — arch identical to R4e. Training hyperparameters modified at command line: epochs=47385 (1.5× R4e's 31590 = 120K optimizer steps). Initial launch failed with `AssertionError: Eval interval must be a divisor of total epochs` because 47385/2106=22.5; fixed to eval_interval=3159 (47385/15, same 15-eval cadence as R4e).
 Hypothesis: Eval exact climbs past R4e's 23.72% with additional training. Train/eval ratio stays near R4e's 2.37× (not collapsing into overfitting).
 Success criterion: Eval exact > 25%.
 Partial: Eval exact within 0.5pp of R4e — saturated, no benefit to extra training.
@@ -1170,7 +1183,33 @@ Failure: Train/eval ratio widens substantially (>3×) — overfitting regime, in
 Runtime note: 1.5× R4e runtime ≈ 4h on the 3090.
 
 ### Result
-TBD
+**PARTIAL on single-shot, STRONG on pass@K (2026-04-18).** Final eval exact **23.89%** vs R4e 23.72% (+0.17pp — within noise). Peak **24.46%** at step 6 vs R4e 24.09% at step 6 (+0.37pp). Misses the 25% success bar by 1.1pp at final. Falls into "partial: within 0.5pp of R4e" — single-shot eval saturated at h=160 by 80K steps. Train/eval ratio widens 2.37× → **2.63×** (train exact climbs +6.45pp to 62.70% while eval is flat), approaching but not crossing the 3× overfitting threshold. Runtime 3h 55m.
+
+**Pass@K tells a completely different story.** pass@1 **33.12%** (+5.20pp vs R4e, +17.5% relative — biggest single pass@1 jump in the project). pass@10 42.86% (+1.95pp). pass@100 **55.84%** (+9.74pp, +21% relative). pass@1000 **59.74%** (+11.69pp, +24% relative). These are all larger than the pass@K gains from the h=96→h=160 width sweep combined.
+
+**Interpretation.** Single-shot per-augmentation accuracy (`all.exact_accuracy`) saturates quickly: wider models lift it (R5a +0.92pp), longer training barely touches it (R5c +0.17pp). But the voting/ranked metrics keep improving because longer training teaches the model more patterns — they just don't all become "the" top prediction for a single augmentation, so per-augmentation accuracy plateaus. When you aggregate across 1000 augmentations, the extra patterns surface.
+
+This shifts the demo/writeup story: if the evaluation metric you care about is "solve the puzzle given reasonable inference-time compute" (pass@K), longer training at h=160 dominates everything tried so far. If it's "solve the puzzle with a single forward pass" (pass@1 without augmentation), width gains plateau around h=160-192 at 24-25% and there's no clear lever left.
+
+Secondary finding: Q-halt accuracy dropped 83.0% → 80.0% with longer training. The ranking signal that pass@K relies on got *worse*, yet pass@K got much better — so the mechanism isn't "Q-halt picks winners better." It's that the distribution of top-1 predictions across augmentations shifted toward including the correct answer more often, regardless of how Q-halt ranks them. Worth investigating whether a different ranker (energy head? longer-training–aware calibration?) could push pass@1 further.
+
+### R5 series summary
+
+| Experiment | params | Eval exact (final / peak) | pass@1 | pass@1000 | Train exact | T/E ratio | Runtime |
+|---|---|---|---|---|---|---|---|
+| R1-h96 baseline | 76.6K | 15.59% / 16.09% | — | 40.91% | 36.33% | 2.33× | ~3h |
+| R4d h=128 | 137K | 21.25% / 21.44% | 24.03% | 43.51% | 47.66% | 2.24× | 2h 05m |
+| R4e h=160 | 211K | 23.72% / 24.09% | 27.92% | 48.05% | 56.25% | 2.37× | 2h 38m |
+| **R5a h=192** | **301K** | **24.64% / 24.86%** | 29.22% | 53.25% | 61.52% | 2.50× | 3h 03m |
+| R5b h=128 loops=16 | 137K | 20.40% / 20.86% (s12) | 25.32% | 46.75% | 57.23% | 2.81× | 3h 55m |
+| **R5c h=160 @120K** | 211K | 23.89% / 24.46% | **33.12%** | **59.74%** | **62.70%** | 2.63× | 3h 55m |
+
+Best per metric: R5a for single-shot exact (24.64% / 24.86%), R5c for ranked pass@K at all K (33.12% / 42.86% / 55.84% / 59.74%).
+
+R5 proves three things:
+1. **Width scaling is real but decelerating.** Clean monotonic curve h=96→192; returns shrink from 3.14pp/doubling at the low end to 0.73pp/sub-doubling at the high end. h=256 would likely gain <0.5pp on single-shot but possibly another few points on pass@K.
+2. **loops>8 is a trap at every width tested.** The R4c pathology is general, not h=96-specific. Until the training signal or regularization is changed, stay in the loops=[6,10] range.
+3. **Training longer keeps paying, but in pass@K rather than pass@1.** The per-augmentation distribution keeps improving past 80K steps; the single-shot answer doesn't. This is the cleanest writeup hook: "URM trained 1.5× longer produced 59.74% pass@1000 on ARC-10×10, from a 211K-parameter, depth-1 transformer on a consumer 3090."
 
 ---
 

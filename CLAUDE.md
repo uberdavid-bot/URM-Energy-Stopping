@@ -95,8 +95,13 @@ The codebase has been streamlined to only the active experiment pipeline:
 - **Deleted losses**: `models/dsm_loss.py`, `ACTLossHead` — DSM was unnecessary; contrastive-only caused energy collapse; ACTLossHead was the old carry-based loss head. Note: `models/trajectory_loss.py` was re-created for R2 (trajectory ranking loss for energy head co-training).
 - **Deleted carry infrastructure**: `ModelCarry` dataclass, `ARCBackbone.forward()`, `ARCBackbone.empty_carry()`, `ARCBackbone.reset_carry()`, `ARCModel.forward()`, `ARCModel.initial_carry()`, per-sample halting logic. Replaced by `forward_trajectory()`.
 - **MLP rounding fix**: `_find_multiple` granularity changed from 256 to 8 in `models/layers.py` to allow smooth capacity scaling at small model sizes (at h=64/exp=2, inter=88 instead of 256).
-- **Active configs**: `config/arch/urm_qhalt.yaml`, `config/arch/ebt_energy.yaml`; h=64 series: `urm_r1i_dropout.yaml`, `urm_r2_trajectory.yaml`, `urm_r2b_trajectory_dropout.yaml`, `urm_r2c_pos_mlp.yaml`, ablation_a1/a2/a3/a4 variants; **h=96 series (current standard)**: `urm_r1_h96_baseline.yaml`, `urm_r2c_h96_pos_mlp.yaml`, `urm_r2g_h96_ranking_noise.yaml`, `urm_r2i_h96_cross_traj.yaml`.
-- **Active scripts**: `scripts/train_h96_scale.sh` (R1-h96 + R2c-h96), `scripts/train_r2g_r2i_h96.sh` (R2g + R2i), `scripts/eval_qhalt_mcmc.py` (R3-diag eval-only MCMC), `scripts/eval_energy_ranking.py` (energy ranking comparison), plus legacy per-experiment scripts.
+- **Active configs** (current: R4/R5 width series):
+  - Baselines + energy: `urm_r1_h96_baseline.yaml`, `urm_r2c_h96_pos_mlp.yaml`, `urm_r2g_h96_ranking_noise.yaml`, `urm_r2i_h96_cross_traj.yaml`, `urm_r3_hybrid_h96.yaml`, `urm_r3b_hybrid_h96.yaml`
+  - Backbone probes at h=96: `urm_r4a_registers_h96.yaml`, `urm_r4b_xsa_h96.yaml`, `urm_r4c_loops16_h96.yaml`
+  - Width sweep (best-performing axis): `urm_r4d_h128.yaml`, `urm_r4e_h160.yaml`, `urm_r4f_h128_regularized.yaml`, `urm_r5a_h192.yaml`, `urm_r5b_h128_loops16.yaml`, `urm_r5c_h160_long.yaml`
+  - Legacy h=64: `urm_r1i_dropout.yaml`, `urm_r2_trajectory.yaml`, `urm_r2b_trajectory_dropout.yaml`, `urm_r2c_pos_mlp.yaml`, `ablation_a1/a2/a3/a4` variants
+  - Legacy base: `urm_qhalt.yaml`, `ebt_energy.yaml`
+- **Active scripts**: `scripts/train_r4_backbone_experiments.sh` (R4b + R4c), `scripts/train_r4d_width_sweep.sh` (R4d/e/f), `scripts/train_r5_scale_sweep.sh` (R5a/b/c), `scripts/analyze_failure_modes.py` (failure bucketing diagnostic), `scripts/eval_qhalt_mcmc.py` (R3-diag), `scripts/eval_energy_ranking.py` (energy ranking comparison), plus legacy per-experiment scripts.
 
 ### Flat trajectory forward architecture
 `ARCModel.forward_trajectory(batch, N)` is the primary entry point. Runs N recurrence steps in a single call with full gradient flow. `EnergyLossHead.forward(batch)` calls `forward_trajectory` and computes deep supervision loss, per-step metrics, and eval stopping metrics. No carry state, no per-sample halting, no outer loop.
@@ -128,18 +133,37 @@ Two pretrain config fields control gradient clipping:
 ### Per-step metrics
 Per-step metrics are computed inside `EnergyLossHead` for both train and eval: `step_k_accuracy`, `step_k_exact_accuracy`, `step_k_delta_norm`. Eval mode additionally computes stopping metrics: `qhalt_stop_step`, `qhalt_stop_accuracy`, `energy_stop_step`, `energy_stop_accuracy`.
 
-### Standard backbone: R1-h96 (the validated operating point)
-**Current best backbone**: depth=1, **h=96**, expansion=2, 8 steps, num_heads=4 (head_dim=24), attn_dropout=0.1, mlp_dropout=0.1, recurrence_noise=0.0. **~76.6K params (transformer)**. `config/arch/urm_r1_h96_baseline.yaml`. Results: **eval exact 15.59%** (step 8), **16.09% peak (step 7)**, train exact 36.33%, train/eval ratio 2.33× (best seen), pass@1000 40.91%. VRAM at batch=512: ~3.6 GB. Monotonic per-step ramp: 0.24% → 5.44% → 11.60% → 13.97% → 15.22% → 16.08% → 16.09% → 15.59%. Peaks at step 7, slight degradation at step 8.
+### Standard backbone: R4e h=160 (the current best, pass@1 27.92% / pass@1000 48.05% at 80K steps)
+**Current best backbone**: depth=1, **h=160**, expansion=2, 8 steps, num_heads=4 (head_dim=40), attn_dropout=0.1, mlp_dropout=0.1. **~211K params**. `config/arch/urm_r4e_h160.yaml`. Results: **eval exact 23.72%** (step 8), **24.09% peak (step 6)**, train exact 56.25%, train/eval ratio 2.37×, pass@1 27.92%, pass@1000 48.05%. Runtime ~2h 38m on 3090.
 
-All new experiments should scale h=96 unless specifically testing scaling. Checkpoint: `checkpoints/R1-h96-baseline-260414/step_80011.pt` (EMA-saved).
+**Best single-shot (peak eval exact): R5a h=192** — 301K params, eval exact 24.64% (peak 24.86% @ step 7), pass@1000 53.25%. `config/arch/urm_r5a_h192.yaml`. Width-scaling returns are decelerating (0.73pp/sub-doubling here); h=256 would likely gain <0.5pp more.
 
-**h=64 (R1i) is legacy** — 35K params, 5.33% eval exact, 3.9× train/eval. Scaling h=64 → h=96 delivered 2.9× eval exact from 2.2× params. The capacity ceiling at h=64 was real and severe.
+**Best pass@K: R5c h=160 trained 120K steps** (vs 80K for R4e) — same 211K params, single-shot barely changes (23.89%) but **pass@1 33.12% / pass@100 55.84% / pass@1000 59.74%** — biggest ranked-metric jump in the project. Train/eval ratio widens 2.37× → 2.63×. `config/arch/urm_r5c_h160_long.yaml`, 1.5× training via CLI epochs=47385 + eval_interval=3159.
+
+**Width scaling curve (eval exact, single-shot, 80K steps)**: h=96 → 15.59%, h=128 → 21.25%, h=160 → 23.72%, h=192 → 24.64%. Decelerating but monotonic. pass@1000 scales faster than pass@1: h=96 40.91% → h=192 53.25%.
+
+**h=96 is now legacy** — the R1-h96 checkpoint at `checkpoints/R1-h96-baseline-260414/step_80011.pt` was the "validated operating point" during R2/R3 but is dominated on every metric by R4e and above. Keep it for reproducibility/writeup reference only.
+
+**h=64 (R1i) is deep legacy** — 35K params, 5.33% eval exact, 3.9× train/eval. Scaling h=64 → h=96 → h=160 delivered 5.33% → 15.59% → 23.72% eval exact at 35K → 76.6K → 211K params. Width is the effective lever on ARC-10×10.
+
+**loops=16 is a trap at every width tested** (R4c h=96 and R5b h=128). Extended refinement produces clean delta-norm decay but polishes past the accuracy peak into worse fixed points — train/eval ratio widens substantially (2.73× at h=96, 2.81× at h=128), single-shot eval drops 2.21pp (h=96) or 0.85pp (h=128) vs loops=8 baseline. The pathology is width-modulated but not width-cured. Stay in loops=[6,10] unless the training signal changes. One partial upside: pass@1000 improves +3.24pp under loops=16 at h=128, consistent with "more trajectory degrees of freedom = more diverse candidates, worse single-shot."
 
 ### Scale-dependent findings (h=64 → h=96 inversion)
 The R2 energy-head story at h=64 does NOT transfer to h=96:
 
 1. **R2c inverted at scale.** At h=64, R2c (position_mlp energy head, elw=0.1) beat R1i by +1.6pp via multi-task regularization. At h=96, R2c-h96 LAGS R1-h96 by **−3.81pp** (11.78% vs 15.59%). Train exact also drops (36.3% → 34.0%), so the energy objective is consuming backbone capacity, not trading train for eval. The "structured multi-task regularization" benefit was a capacity-starvation crutch, not a universal mechanism.
 2. **Ablation series A (A1/A2/A3) is still valid mechanistically** — random labels (A2) catastrophically destroy h=64 backbone, detach (A3) matches R1i baseline — but all A-series experiments were at h=64 and the conclusions about *strength* of regularization are scale-dependent.
+
+### R4/R5 backbone probe findings (width wins, other axes don't)
+After R2/R3 concluded that energy-based refinement doesn't help beyond URM, R4/R5 tested architectural axes on the backbone itself. Width was the only lever that worked.
+
+1. **Failure mode analysis on R1-h96** (`logs/failure_modes_R1h96.txt`, `scripts/analyze_failure_modes.py`): 84% of wrong predictions "oscillating" (step-8 delta_norm > 0.003), ~0% stuck, 88% don't fire Q-halt. Q-halt is well-calibrated; R1-h96 doesn't sit in local minima.
+2. **R4c reframed the "oscillation" finding.** At loops=16 on h=96, delta norms decay monotonically 5.32 → 0.17 (30× below the "oscillating" threshold). Hidden states are slowly relaxing toward fixed points, not cycling. The 0.003 threshold was too tight given the natural relaxation timescale. R5b confirmed the pathology generalizes: same shape at h=128, smaller magnitude.
+3. **Delta norm ≠ correctness.** Wider models have *larger* step-8 delta norms but better accuracy (R1-h96 step-8 delta 0.52 / 15.59% exact; R4e h=160 step-8 delta 0.95 / 23.72% exact; R5a h=192 step-8 delta 1.22 / 24.64% exact). "Still moving at step 8" and "converged to the right answer" are orthogonal.
+4. **XSA (R4b) neutral, registers (R4a) skipped, extended refinement (R4c/R5b) harmful.** The `num_registers` and `exclusive_attention` config fields exist and default to no-op; retained as documented architectural options.
+5. **Regularization at h=128 (R4f) doesn't move eval.** Dropout 0.1→0.15, wd 0.1→0.15 produces tiny train-fit reduction and zero eval gain. pass@1000 does improve +1.94pp — heavier dropout = more diverse candidates.
+6. **Longer training at h=160 (R5c) saturates single-shot but keeps boosting pass@K.** 80K → 120K steps gains +0.17pp on final eval exact but +5.20pp on pass@1, +9.74pp on pass@100, +11.69pp on pass@1000. Train/eval widens 2.37× → 2.63×. Productive memorization that surfaces through voting, not overfitting collapse. Q-halt accuracy actually dropped 83% → 80%, so the pass@K gain is not from better ranking — it's from a richer top-1 distribution across augmentations.
+7. **Single-shot saturation point: h≈160-192 at 80K steps, ~24-25% eval exact.** No cheap lever (attention variant, loops, dropout, wd) breaks this ceiling. The two axes that still pay: wider model (decelerating) and longer training (pass@K only).
 
 ### Energy head training status — ranking noise is the mechanism; cross-trajectory is dead; trained energy function needed for MCMC
 R2/R2b/R2c (h=64) and R2c-h96/R2g-h96/R2i-h96 (h=96) comprehensively tested trajectory ranking loss for energy head co-training. The story is now complete:

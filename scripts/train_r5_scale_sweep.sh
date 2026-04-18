@@ -76,8 +76,8 @@ DISABLE_COMPILE=1 $CONDA_RUN torchrun --nproc-per-node 1 pretrain.py \
 echo "=== R5b complete ==="
 
 # [3/3] R5c: h=160, loops=8, 120K steps (1.5x R4e)
-# epochs=47385 (vs 31590 for 80K); eval_interval=2106 keeps the same cadence,
-# giving ~22 evals across the longer run.
+# epochs=47385 (vs 31590 for 80K). eval_interval MUST divide epochs (pretrain.py
+# enforces this) — 3159 = 47385/15, giving 15 evals, the same cadence as R4e.
 run_name="R5c-h160-long-$(date +%y%m%d)"
 checkpoint_path="checkpoints/${run_name}"
 mkdir -p $checkpoint_path
@@ -86,7 +86,7 @@ DISABLE_COMPILE=1 $CONDA_RUN torchrun --nproc-per-node 1 pretrain.py \
   arch=urm_r5c_h160_long \
   data_path=data/arc1concept-aug-1000-size-10 \
   epochs=47385 \
-  eval_interval=2106 \
+  eval_interval=3159 \
   global_batch_size=512 \
   lr=3e-4 \
   lr_min_ratio=1.0 \

@@ -97,7 +97,8 @@ class RotaryEmbedding(nn.Module):
 
 class Attention(nn.Module):
     def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False, attn_dropout=0.0,
-                 exclusive_attention=False):
+                 exclusive_attention=False, attention_sink=False, attention_temperature=False,
+                 rope_dim=None):
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -107,35 +108,74 @@ class Attention(nn.Module):
         self.num_key_value_heads = num_key_value_heads
         self.causal = causal
         self.exclusive_attention = exclusive_attention
+        self.rope_dim = rope_dim if rope_dim is not None else head_dim
 
         self.attn_dropout = attn_dropout
 
         self.qkv_proj = CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False)
         self.o_proj = CastedLinear(self.output_size, self.hidden_size, bias=False)
 
+        if attention_sink:
+            self.sink_logits = nn.Parameter(torch.zeros(num_heads))
+        else:
+            self.sink_logits = None
+
+        if attention_temperature:
+            self.attn_temperature = nn.Parameter(torch.zeros(num_heads))
+        else:
+            self.attn_temperature = None
+
     def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
 
-        # hidden_states: [bs, seq_len, num_heads, head_dim]
         qkv = self.qkv_proj(hidden_states)
 
-        # Split head
         qkv = qkv.view(batch_size, seq_len, self.num_heads + 2 * self.num_key_value_heads, self.head_dim)
         query = qkv[:, :, :self.num_heads]
         key = qkv[:, :, self.num_heads: self.num_heads + self.num_key_value_heads]
         value = qkv[:, :, self.num_heads + self.num_key_value_heads:]
 
-        # RoPE
+        # Partial RoPE: apply rotary embeddings to only the last rope_dim dimensions
         if cos_sin is not None:
             cos, sin = cos_sin
-            query, key = apply_rotary_pos_emb(query, key, cos, sin)
+            if self.rope_dim < self.head_dim:
+                content_dim = self.head_dim - self.rope_dim
+                q_content, q_rope = query.split([content_dim, self.rope_dim], dim=-1)
+                k_content, k_rope = key.split([content_dim, self.rope_dim], dim=-1)
+                q_rope, k_rope = apply_rotary_pos_emb(q_rope, k_rope, cos, sin)
+                query = torch.cat([q_content, q_rope], dim=-1)
+                key = torch.cat([k_content, k_rope], dim=-1)
+            else:
+                query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-        if self.exclusive_attention:
-            # R4b: SDPA with diagonal mask. flash_attn does not accept arbitrary masks,
-            # so we fall back to scaled_dot_product_attention. Each token attends
-            # exclusively to other tokens (a_ii = 0). Causal flag is honored only
-            # additively here — exclusive_attention currently assumes non-causal.
-            # Reshape [bs, seq_len, n_heads, head_dim] -> [bs, n_heads, seq_len, head_dim]
+        # Per-head temperature: multiplicative scaling of attention logits
+        if self.attn_temperature is not None:
+            scale = torch.exp(self.attn_temperature).to(query.dtype).view(1, 1, self.num_heads, 1)
+            query = query * scale
+
+        if self.sink_logits is not None:
+            # Manual attention with sink logits in softmax denominator.
+            # attn_ij = exp(score_ij) / (sum_k exp(score_ik) + exp(sink_h))
+            query_t = query.transpose(1, 2)  # [bs, n_heads, seq_len, head_dim]
+            key_t = key.transpose(1, 2)
+            value_t = value.transpose(1, 2)
+            if self.num_key_value_heads != self.num_heads:
+                repeat = self.num_heads // self.num_key_value_heads
+                key_t = key_t.repeat_interleave(repeat, dim=1)
+                value_t = value_t.repeat_interleave(repeat, dim=1)
+            scores = torch.matmul(query_t, key_t.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            scores = scores.float()
+            max_scores = scores.max(dim=-1, keepdim=True).values
+            exp_scores = torch.exp(scores - max_scores)
+            sink_shifted = self.sink_logits.view(1, -1, 1, 1) - max_scores
+            denom = exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink_shifted)
+            attn_weights = exp_scores / denom
+            if self.training and self.attn_dropout > 0:
+                attn_weights = F.dropout(attn_weights, p=self.attn_dropout)
+            attn_output = torch.matmul(attn_weights, value_t.float())
+            attn_output = attn_output.to(value_t.dtype).transpose(1, 2).contiguous()
+        elif self.exclusive_attention:
+            # R4b: SDPA with diagonal mask
             query_t = query.transpose(1, 2)
             key_t = key.transpose(1, 2)
             value_t = value.transpose(1, 2)
@@ -151,16 +191,14 @@ class Attention(nn.Module):
                 dropout_p=self.attn_dropout if self.training else 0.0,
                 is_causal=False,
             )
-            # [bs, n_heads, seq_len, head_dim] -> [bs, seq_len, n_heads * head_dim]
             attn_output = attn_output.transpose(1, 2).contiguous()
         else:
-            # flash attn
+            # flash attn (handles GQA natively when num_kv_heads < num_heads)
             attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal, dropout_p=self.attn_dropout if self.training else 0.0)
-            if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
+            if isinstance(attn_output, tuple):
                 attn_output = attn_output[0]
 
-        # attn_output: [batch_size, num_heads, seq_len, head_dim]
-        attn_output = attn_output.view(batch_size, seq_len, self.output_size)  # type: ignore
+        attn_output = attn_output.view(batch_size, seq_len, self.output_size)
         return self.o_proj(attn_output)
 
 

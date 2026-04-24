@@ -26,6 +26,14 @@ class ARCModelConfig(BaseModel):
     num_registers: int = 0
     # R4b: mask attention diagonal so each token attends exclusively to others
     exclusive_attention: bool = False
+    # R6a: per-head learnable sink logit in softmax denominator (allows attn weights to sum < 1)
+    attention_sink: bool = False
+    # R6b: per-head learnable temperature (multiplicative scaling of pre-softmax logits)
+    attention_temperature: bool = False
+    # R6g: fraction of head_dim to apply RoPE to (rest is content-only attention)
+    rope_fraction: float = 1.0
+    # R6h: number of KV heads for grouped-query attention (None = num_heads, i.e., standard MHA)
+    num_kv_heads: Optional[int] = None
     # Additive Gaussian noise stddev applied to hidden states after each URM recurrence pass (training only)
     recurrence_noise: float = 0.0
     rms_norm_eps: float = 1e-5
@@ -58,14 +66,21 @@ class ARCModelConfig(BaseModel):
 class ARCBlock(nn.Module):
     def __init__(self, config: ARCModelConfig) -> None:
         super().__init__()
+        head_dim = config.hidden_size // config.num_heads
+        num_kv_heads = config.num_kv_heads if config.num_kv_heads is not None else config.num_heads
+        rope_dims = round(head_dim * config.rope_fraction)
+        rope_dims = rope_dims - (rope_dims % 2)  # must be even for RoPE
         self.self_attn = Attention(
             hidden_size=config.hidden_size,
-            head_dim=config.hidden_size // config.num_heads,
+            head_dim=head_dim,
             num_heads=config.num_heads,
-            num_key_value_heads=config.num_heads,
+            num_key_value_heads=num_kv_heads,
             causal=False,
             attn_dropout=config.attn_dropout,
             exclusive_attention=config.exclusive_attention,
+            attention_sink=config.attention_sink,
+            attention_temperature=config.attention_temperature,
+            rope_dim=rope_dims if config.rope_fraction < 1.0 else None,
         )
         self.mlp = ConvSwiGLU(
             hidden_size=config.hidden_size,
@@ -88,6 +103,15 @@ class ARCBackbone(nn.Module):
     def __init__(self, config: ARCModelConfig) -> None:
         super().__init__()
         self.config = config
+
+        assert not (config.attention_sink and config.attention_temperature), \
+            "attention_sink and attention_temperature are mutually exclusive"
+        if config.num_kv_heads is not None:
+            assert config.num_heads % config.num_kv_heads == 0, \
+                f"num_heads ({config.num_heads}) must be divisible by num_kv_heads ({config.num_kv_heads})"
+        assert config.hidden_size % config.num_heads == 0, \
+            f"hidden_size ({config.hidden_size}) must be divisible by num_heads ({config.num_heads})"
+
         self.forward_dtype = getattr(torch, self.config.forward_dtype)
         self.embed_scale = math.sqrt(self.config.hidden_size)
         embed_init_std = 1.0 / self.embed_scale
@@ -122,10 +146,11 @@ class ARCBackbone(nn.Module):
                 )
             )
 
-        # compute_joint_energy concatenates input_emb [P + R + seq_len] + output_emb [R + seq_len]
-        # (output_emb = hidden[:, P:] keeps the register slots). Total length = 2*seq_len + P + 2*R.
+        head_dim = self.config.hidden_size // self.config.num_heads
+        rope_dims = round(head_dim * self.config.rope_fraction)
+        rope_dims = rope_dims - (rope_dims % 2)
         self.rotary_emb = RotaryEmbedding(
-            dim=self.config.hidden_size // self.config.num_heads,
+            dim=rope_dims,
             max_position_embeddings=(
                 2 * self.config.seq_len
                 + self.puzzle_emb_len

@@ -99,9 +99,10 @@ The codebase has been streamlined to only the active experiment pipeline:
   - Baselines + energy: `urm_r1_h96_baseline.yaml`, `urm_r2c_h96_pos_mlp.yaml`, `urm_r2g_h96_ranking_noise.yaml`, `urm_r2i_h96_cross_traj.yaml`, `urm_r3_hybrid_h96.yaml`, `urm_r3b_hybrid_h96.yaml`
   - Backbone probes at h=96: `urm_r4a_registers_h96.yaml`, `urm_r4b_xsa_h96.yaml`, `urm_r4c_loops16_h96.yaml`
   - Width sweep (best-performing axis): `urm_r4d_h128.yaml`, `urm_r4e_h160.yaml`, `urm_r4f_h128_regularized.yaml`, `urm_r5a_h192.yaml`, `urm_r5b_h128_loops16.yaml`, `urm_r5c_h160_long.yaml`
+  - Attention architecture sweep at h=128: `urm_r6a_sink_h128.yaml`, `urm_r6b_temperature_h128.yaml`, `urm_r6c_registers_h128.yaml`, `urm_r6d_heads8_h128.yaml`, `urm_r6e_heads16_h128.yaml`, `urm_r6f_heads2_h128.yaml`, `urm_r6g_partial_rope_h128.yaml`, `urm_r6h_gqa_h128.yaml`
   - Legacy h=64: `urm_r1i_dropout.yaml`, `urm_r2_trajectory.yaml`, `urm_r2b_trajectory_dropout.yaml`, `urm_r2c_pos_mlp.yaml`, `ablation_a1/a2/a3/a4` variants
   - Legacy base: `urm_qhalt.yaml`, `ebt_energy.yaml`
-- **Active scripts**: `scripts/train_r4_backbone_experiments.sh` (R4b + R4c), `scripts/train_r4d_width_sweep.sh` (R4d/e/f), `scripts/train_r5_scale_sweep.sh` (R5a/b/c), `scripts/analyze_failure_modes.py` (failure bucketing diagnostic), `scripts/eval_qhalt_mcmc.py` (R3-diag), `scripts/eval_energy_ranking.py` (energy ranking comparison), plus legacy per-experiment scripts.
+- **Active scripts**: `scripts/train_r4_backbone_experiments.sh` (R4b + R4c), `scripts/train_r4d_width_sweep.sh` (R4d/e/f), `scripts/train_r5_scale_sweep.sh` (R5a/b/c), `scripts/train_r6_attention_sweep.sh` (R6a-h), `scripts/analyze_failure_modes.py` (failure bucketing diagnostic), `scripts/eval_qhalt_mcmc.py` (R3-diag), `scripts/eval_energy_ranking.py` (energy ranking comparison), plus legacy per-experiment scripts.
 
 ### Flat trajectory forward architecture
 `ARCModel.forward_trajectory(batch, N)` is the primary entry point. Runs N recurrence steps in a single call with full gradient flow. `EnergyLossHead.forward(batch)` calls `forward_trajectory` and computes deep supervision loss, per-step metrics, and eval stopping metrics. No carry state, no per-sample halting, no outer loop.
@@ -115,6 +116,13 @@ Three model config fields control regularization (R1i+, A4+):
 - **`attn_dropout`**: float (default 0.0). Dropout applied inside flash attention. Passed through `ARCBlock` → `Attention` → `flash_attn_func(dropout_p=...)`. Training only.
 - **`mlp_dropout`**: float (default 0.0). Dropout applied after MLP output, before residual add in `ARCBlock`. Standard `nn.Dropout`.
 - **`recurrence_noise`**: float (default 0.0). Additive Gaussian noise σ applied to hidden states after each URM transformer pass, training only. A4 experiments tested this as a dropout alternative — it did not help at σ=0.005 (R1h-equivalent) or σ=0.003+dropout=0.05 (below R1i). Documented negative. Dropout=0.1 remains the standard.
+
+Five model config fields control attention architecture (R6):
+- **`attention_sink`**: bool (default false). Per-head learnable sink logit in softmax denominator — allows attention weights to sum to <1. Falls back to manual softmax (no flash_attn). Mutually exclusive with `attention_temperature`.
+- **`attention_temperature`**: bool (default false). Per-head learnable temperature `exp(t_h)` multiplied into query vectors, equivalent to scaling pre-softmax logits. Mutually exclusive with `attention_sink`.
+- **`rope_fraction`**: float (default 1.0). Fraction of head_dim to apply RoPE to. The first `head_dim - rope_dims` dimensions do pure content-based attention. `rope_dims` is rounded to nearest even number.
+- **`num_kv_heads`**: int (default None = `num_heads`, i.e., standard MHA). Number of KV heads for grouped-query attention. `num_heads` must be divisible by `num_kv_heads`. Flash_attn handles GQA natively.
+- **`num_registers`**: int (default 0). Learnable register tokens prepended between puzzle_emb and input tokens. Participate in attention, excluded from reconstruction loss. Already existed from R4a.
 
 Two model config fields control energy head architecture (R2c+):
 - **`energy_head_type`**: `"linear"` (default, mean_pool→Linear(H,1), 65 params) | `"position_mlp"` (per-position MLP→sum, ~2K params at h=64 / ~3K at h=96) | `"position_conv_mlp"` (conv+MLP) | `"position_attn_mlp"` (attention+MLP). Implemented via `PositionEnergyHead` class.

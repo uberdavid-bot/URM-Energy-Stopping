@@ -1,0 +1,36 @@
+# R6b — Per-head learnable attention temperature at h=128
+# Multiplicative scaling of pre-softmax logits via exp(learned_param).
+# Positive param → sharpening, negative → softening.
+# Note: the original "attention_bias" (additive shift) is a no-op under softmax
+# (shift-invariant), so we use multiplicative temperature instead.
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+  energy_loss_weight: 0.0
+  ranking_margin: 0.1
+
+loops: 8
+num_layers: 1
+hidden_size: 128
+num_heads: 4
+expansion: 2
+
+attn_dropout: 0.1
+mlp_dropout: 0.1
+recurrence_noise: 0.0
+
+attention_temperature: true
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+energy_threshold: 0.005
+min_steps: 8
+
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+
+ema: True
+ema_rate: 0.999

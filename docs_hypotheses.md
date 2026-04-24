@@ -1229,3 +1229,59 @@ R5 proves three things:
 11. **More energy head capacity ≠ better generalization** (R2c vs R2b). Position-aware MLP (2K params) had worse eval Spearman (-0.069) than linear head (-0.585). The problem is the training signal (trajectory ranking), not the architecture.
 12. **Mean pooling destroys spatial info but that's not the bottleneck** (R2c). Preserving per-position information didn't help cross-input ranking. The energy head sees backbone features that encode puzzle-specific patterns, not abstract quality.
 13. **Energy co-training is structured multi-task regularization, not generic gradient noise** (A1/A2/A3). R2c's backbone gain requires both a correctly-ordered trajectory signal (A2 random labels → catastrophic regression, 5.33% → 1.31%) and gradient flow into the shared backbone (A3 detach → eval exact snaps back to R1i baseline). A1 additionally shows an inverse-U in loss weight peaked at elw=0.1–0.2 — weight 0.5 collapses reconstruction. Any story that reduces R2c to "extra parameters" or "any auxiliary gradient helps" is ruled out.
+
+---
+
+## R6 series — Attention architecture sweep at h=128
+
+Motivation: R4 series established h=128 as the validated operating point (R4d: 21.25% eval exact, 24.03% pass@1). R4b (XSA) was neutral. R4c/R5b showed extended refinement hurts. Width scaling (R4d→R4e→R5a) shows decelerating returns. Before scaling further, test whether attention-level architectural changes can unlock better per-step refinement quality at fixed width.
+
+All experiments use R4d as baseline (d=1, h=128, exp=2, loops=8, dropout=0.1, weight_decay=0.1, 136K params). Only attention knobs change.
+
+### R6a — Attention sink logits
+Config: `config/arch/urm_r6a_sink_h128.yaml`
+Mechanism: Per-head learnable scalar in softmax denominator. Allows attention to sum to <1 per head. Manual softmax implementation (no flash_attn).
+Hypothesis: During early recurrence steps, hidden states are unrefined — the optimal behavior may be weak attention everywhere rather than forced commitment. Sink logits let heads express "nothing relevant" and dampen signal when unconfident. May accelerate early-step convergence.
+Success criterion: Eval exact > 21.25% (R4d baseline).
+
+### R6b — Per-head learnable temperature
+Config: `config/arch/urm_r6b_temperature_h128.yaml`
+Mechanism: Per-head learnable scalar `exp(t_h)` multiplied into query before attention (equivalent to scaling pre-softmax logits). Note: the originally-proposed "attention_bias" (additive shift on all logits) is a no-op — softmax is shift-invariant. Multiplicative temperature actually changes the distribution shape.
+Hypothesis: A learned temperature lets each head control its attention sharpness. Positive → sharper, negative → softer. Different from sink logits: temperature rescales the full distribution rather than adding a "null" option.
+Success criterion: Eval exact > 21.25%.
+
+### R6c — Register tokens (4 tokens)
+Config: `config/arch/urm_r6c_registers_h128.yaml`
+Mechanism: 4 learnable register tokens prepended to sequence, participate in attention but excluded from reconstruction loss. Persist across recurrence steps.
+Hypothesis: Registers serve as working memory for recurrence — the model can write intermediate computations (symmetry detection, color counts, etc.) and read them back in later steps. Different from R4a motivation (escaping minima — failure mode analysis showed ~0% stuck-in-minima). Here the hypothesis is about enriching the information flow across recurrence steps.
+Success criterion: Eval exact > 21.25%. Secondary: per-step accuracy at steps 6-8 improves relative to steps 1-3 (registers help later steps more).
+
+### R6d — 8 heads (head_dim=16)
+Config: `config/arch/urm_r6d_heads8_h128.yaml`
+Mechanism: Double the head count, halve head dimension. More diverse attention patterns at the cost of per-head expressiveness.
+Hypothesis: More heads → more specialized refinement behaviors across recurrence steps (color counting, adjacency, symmetry, etc.). At head_dim=16, QK dot products still have reasonable capacity.
+Success criterion: Eval exact > 21.25%.
+
+### R6e — 16 heads (head_dim=8)
+Config: `config/arch/urm_r6e_heads16_h128.yaml`
+Mechanism: 4× head count, head_dim=8. Tests the extreme of the head-count spectrum.
+Hypothesis: At head_dim=8, each head operates in a very low-dimensional space. May help if ARC tasks benefit from many simple attention patterns, or may hurt if QK dot products lack capacity.
+Success criterion: Eval exact > 20% (lower bar — this is exploratory).
+
+### R6f — 2 heads (head_dim=64)
+Config: `config/arch/urm_r6f_heads2_h128.yaml`
+Mechanism: Half the head count, double head dimension. Fewer but richer attention patterns.
+Hypothesis: Per-head expressiveness matters more than diversity for ARC. Each head has a much richer representation of attended content, which may help with complex spatial reasoning.
+Success criterion: Eval exact > 21.25%.
+
+### R6g — Partial RoPE (50%)
+Config: `config/arch/urm_r6g_partial_rope_h128.yaml`
+Mechanism: Apply RoPE to only the last 50% of each head's dimensions. The first 50% does pure content-based attention.
+Hypothesis: During recurrence, the semantic meaning at each position changes (early: raw features, late: refined predictions). Content-only dimensions let the model attend based on "what's here now" regardless of position, while RoPE dimensions handle "where is it." As refinement progresses, content-based attention becomes more useful.
+Success criterion: Eval exact > 21.25%.
+
+### R6h — GQA (8 query heads, 2 KV heads)
+Config: `config/arch/urm_r6h_gqa_h128.yaml`
+Mechanism: 8 query heads sharing 2 KV heads (head_dim=16). Tests diverse Q patterns with shared factual KV retrieval. Uses flash_attn's native GQA support.
+Hypothesis: For recurrence, consistent factual retrieval (shared KV) with diverse interpretation (many Q heads) may be beneficial. Each recurrence step sees the same "facts" but extracts different aspects.
+Success criterion: Eval exact > 21.25%.

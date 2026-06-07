@@ -267,9 +267,13 @@ class EnergyLossHead(nn.Module):
                 metrics["gram_kl"] = gram_kl_mean.detach() * metrics["count"]
             if self.model.config.gram_enabled:
                 with torch.no_grad():
-                    # Prior sigma mean: monitor for eps->0 collapse
-                    sample_pre = all_hidden[0] + input_embeddings  # representative pre_t
-                    prior_out = self.model.gram_prior_mlp(sample_pre)
+                    sample_pre = all_hidden[0] + input_embeddings
+                    k = self.model.config.gram_latent_dim
+                    if k > 0:
+                        pooled = sample_pre.mean(dim=1)
+                        prior_out = self.model.gram_prior_mlp(pooled)
+                    else:
+                        prior_out = self.model.gram_prior_mlp(sample_pre)
                     _, logvar_p = self.model._gram_split(prior_out)
                     sigma_mean = torch.exp(0.5 * logvar_p).mean()
                     metrics["gram_sigma_mean"] = sigma_mean * metrics["count"]

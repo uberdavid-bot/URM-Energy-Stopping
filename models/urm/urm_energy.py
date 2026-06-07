@@ -68,6 +68,8 @@ class ARCModelConfig(BaseModel):
     gram_logvar_max: float = 2.0
     gram_mlp_hidden: int = 64
     gram_num_samples: int = 8
+    # R7c: per-example bottleneck latent dimension (0 = legacy per-position full-H eps)
+    gram_latent_dim: int = 0
     # R7b: decode logits from pre-eps deterministic state (breaks one-pass posterior leak)
     gram_predecode: bool = False
     # R7b: stop recon-loss gradients from flowing into posterior MLP (KL-only posterior shaping)
@@ -290,17 +292,33 @@ class ARCModel(nn.Module):
         if self.config.gram_enabled:
             H = self.config.hidden_size
             gh = self.config.gram_mlp_hidden
+            k = self.config.gram_latent_dim
             dt = self.inner.forward_dtype
-            self.gram_prior_mlp = nn.Sequential(
-                nn.Linear(H, gh, dtype=dt),
-                nn.SiLU(),
-                nn.Linear(gh, 2 * H, dtype=dt),
-            )
-            self.gram_posterior_mlp = nn.Sequential(
-                nn.Linear(2 * H, gh, dtype=dt),
-                nn.SiLU(),
-                nn.Linear(gh, 2 * H, dtype=dt),
-            )
+            if k > 0:
+                # R7c: per-example bottleneck latent of dim k, projected up to H and broadcast
+                self.gram_prior_mlp = nn.Sequential(
+                    nn.Linear(H, gh, dtype=dt),
+                    nn.SiLU(),
+                    nn.Linear(gh, 2 * k, dtype=dt),
+                )
+                self.gram_posterior_mlp = nn.Sequential(
+                    nn.Linear(2 * H, gh, dtype=dt),
+                    nn.SiLU(),
+                    nn.Linear(gh, 2 * k, dtype=dt),
+                )
+                self.gram_up_proj = nn.Linear(k, H, bias=False, dtype=dt)
+            else:
+                # R7a/R7b: per-position full-H eps
+                self.gram_prior_mlp = nn.Sequential(
+                    nn.Linear(H, gh, dtype=dt),
+                    nn.SiLU(),
+                    nn.Linear(gh, 2 * H, dtype=dt),
+                )
+                self.gram_posterior_mlp = nn.Sequential(
+                    nn.Linear(2 * H, gh, dtype=dt),
+                    nn.SiLU(),
+                    nn.Linear(gh, 2 * H, dtype=dt),
+                )
 
     @property
     def puzzle_emb(self):
@@ -312,8 +330,8 @@ class ARCModel(nn.Module):
         return mu + std * torch.randn_like(mu)
 
     def _gram_split(self, out: torch.Tensor):
-        H = self.config.hidden_size
-        mu, logvar = out[..., :H], out[..., H:]
+        d = out.shape[-1] // 2
+        mu, logvar = out[..., :d], out[..., d:]
         logvar = logvar.clamp(self.config.gram_logvar_min, self.config.gram_logvar_max)
         return mu, logvar
 
@@ -443,18 +461,39 @@ class ARCModel(nn.Module):
 
                 # GRAM: stochastic latent perturbation
                 if self.config.gram_enabled:
-                    mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pre_t))
+                    k = self.config.gram_latent_dim
+                    if k > 0:
+                        # R7c: per-example bottleneck — pool across positions, sample [B, k], broadcast
+                        pooled = pre_t.mean(dim=1)  # [B, H]
+                        mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pooled))  # [B, k] each
 
-                    if use_posterior:
-                        posterior_input = torch.cat([pre_t, gram_label_emb], dim=-1)
-                        mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
-                        eps_t = self._gram_reparam(mu_q, logvar_q)
-                        if self.config.gram_detach_posterior_recon:
-                            eps_t = eps_t.detach()
-                        kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)
-                        all_gram_kl.append(kl_t.mean())
+                        if use_posterior:
+                            pooled_label = gram_label_emb.mean(dim=1)  # [B, H]
+                            posterior_input = torch.cat([pooled, pooled_label], dim=-1)  # [B, 2H]
+                            mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
+                            z = self._gram_reparam(mu_q, logvar_q)  # [B, k]
+                            if self.config.gram_detach_posterior_recon:
+                                z = z.detach()
+                            kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)  # [B]
+                            all_gram_kl.append(kl_t.mean())
+                        else:
+                            z = self._gram_reparam(mu_p, logvar_p)  # [B, k]
+
+                        eps_t = self.gram_up_proj(z).unsqueeze(1).expand_as(pre_t)  # [B, P+seq, H]
                     else:
-                        eps_t = self._gram_reparam(mu_p, logvar_p)
+                        # R7a/R7b: per-position full-H eps
+                        mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pre_t))
+
+                        if use_posterior:
+                            posterior_input = torch.cat([pre_t, gram_label_emb], dim=-1)
+                            mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
+                            eps_t = self._gram_reparam(mu_q, logvar_q)
+                            if self.config.gram_detach_posterior_recon:
+                                eps_t = eps_t.detach()
+                            kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)
+                            all_gram_kl.append(kl_t.mean())
+                        else:
+                            eps_t = self._gram_reparam(mu_p, logvar_p)
 
                     if self.config.gram_predecode:
                         # R7b: decode from deterministic state BEFORE eps injection.

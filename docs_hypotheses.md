@@ -1393,3 +1393,62 @@ Success criteria:
 4. Single-trajectory eval exact ≥ 18% at 80K steps (within 3pp of R4d baseline)
 
 Metrics to watch: same as R7a, plus comparison of train saturation speed to R4d baseline.
+
+### Result
+TBD (smoke test confirmed pre-eps decode shifts leak to multi-pass — see R7c for structural fix)
+
+---
+
+### R7c — GRAM with per-example bottleneck latent (capacity-based leak fix)
+
+Date: 2026-06-06
+Config: `config/arch/urm_r7c_gram_bottleneck_h128.yaml`
+Baseline: R7a (one-pass leak), R7b (two-pass leak), R4d (d=1, h=128, exp=2, loops=8, dropout=0.1, 137K params, 21.25% eval exact).
+
+**Diagnosis of R7a/R7b leak progression:** R7a leaked in one pass (posterior → eps → same-step decode). R7b shifted the leak to two passes (decode from pre-eps state, but eps feeds the next step's carry — posterior routes labels through eps_{t-1} into the next transformer pass, which decodes them). The root cause is capacity: per-position full-H eps of shape [B, P+seq, H] has far more capacity than needed to encode a 100-token target. No number of decode-ordering tricks closes the leak, because deep supervision rewards finding the laundering path at any length.
+
+**Fix: per-example bottleneck latent.** Replace per-position full-H eps with a low-dimensional per-example latent code z ∈ R^k (k=16), projected up and broadcast across positions:
+1. Mean-pool pre_t across positions to [B, H] (per-example representation)
+2. Prior MLP: [B, H] → [B, 2k] → (mu_p, logvar_p) of [B, k]
+3. Posterior MLP: concat(pooled_pre_t, pooled_label_emb) [B, 2H] → [B, 2k] → (mu_q, logvar_q) of [B, k]
+4. Sample z ~ N(mu, logvar) via reparameterization, [B, k]
+5. Project up: eps = up_proj(z), Linear(k→H), giving [B, H], broadcast to [B, P+seq, H]
+
+The bottleneck is the whole point: 16 floats per example can express "which strategy branch" but physically cannot memorize a 100-token grid (would need ~100 * log2(11) ≈ 346 bits; 16 fp16 values carry ~160 bits, and most of that is consumed by variance).
+
+Keeps R7b's decode-off-pre-eps-state structure. `gram_detach_posterior_recon=True` by default — only KL shapes the posterior.
+
+**Hypothesis:** Two possible outcomes:
+1. **(a) Bottleneck closes leak AND eval improves over baseline**: The latent steers trajectories toward different solution strategies, providing genuine diversity for multi-trajectory voting. Pursue width (M trajectories) scaling.
+2. **(b) Bottleneck closes leak but eval collapses to ~baseline**: ARC's single-target structure gives the target-conditioned posterior no legitimate signal beyond memorization. Once eps physically can't memorize, there's nothing for it to learn. This parallels the energy-mechanism findings (mechanism X has no room to help in this regime) and is publishable as part of that arc.
+
+**Params:** ~141K total. GRAM modules: prior_mlp H→64→2k = 128×64+64+64×32+32 ≈ 10.3K, posterior_mlp 2H→64→2k ≈ 18.6K, up_proj k→H = 16×128 = 2K. Total GRAM ~31K (vs R7a/R7b's ~58K). Combined with R4d backbone: ~168K total.
+
+Success criteria:
+1. No leak: `train/step_8_exact_accuracy` should NOT saturate to 1.0 within hundreds of steps
+2. `gram_kl` stays small and stable (posterior ≈ prior is acceptable — means bottleneck is working)
+3. Eval exact accuracy ≥ 18% at 80K steps (within 3pp of R4d baseline) — GRAM doesn't destroy backbone
+4. If eval pass@K or majority-vote beats R4d baseline → genuine positive (outcome a)
+
+Metrics to watch: same as R7a/R7b, plus step_8_exact trajectory vs R4d baseline learning curve.
+
+#### Smoke test (pre-launch diagnostic)
+
+Run: `R7c-smoke-test-2`, wandb: `uberdavid-personal/arcagi/r70wx51p`
+~5942 steps at batch=64 (≈ 743 equivalent steps at batch=512). 300 epochs.
+
+**Leak is closed.** Per-step exact accuracy trajectory:
+
+| Step | s1 | s4 | s8 | gram_kl | gram_sigma_mean |
+|------|------|------|------|---------|-----------------|
+| 100 | 0.000 | 0.000 | 0.000 | 0.204 | 1.016 |
+| 500 | 0.000 | 0.000 | 0.000 | 0.001 | 1.047 |
+| 1000 | 0.000 | 0.000 | 0.000 | -0.002 | 1.055 |
+| 3000 | 0.000 | 0.000 | 0.000 | 0.002 | 1.055 |
+| 5900 | 0.000 | 0.000 | 0.000 | 0.001 | 1.055 |
+
+R7a comparison: step_8_exact → 1.0 within 300 steps, gram_kl spiked to 73. R7c shows zero saturation and gram_kl at numerical noise around 0 throughout. The per-example k=16 bottleneck eliminates the per-position capacity leak.
+
+KL collapsed to ~0 by step 500 — posterior collapsed to prior. Expected: with `gram_detach_posterior_recon=True`, the posterior only gets KL gradients, and 16 dims can't encode the answer, so there's no gradient signal to keep the posterior active. Prior sigma stayed at ~1.05 (initialization, no collapse).
+
+The learning curve matches the deterministic baseline at equivalent early training (~0 exact at <1000 effective steps, which is where R4d also shows ~0). Full run needed to determine if GRAM adds value beyond baseline (outcome a vs b).

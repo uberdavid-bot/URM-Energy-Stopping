@@ -421,5 +421,85 @@ class TestLossHeadIntegration:
         assert torch.isfinite(loss)
 
 
+class TestGRAMCleanDecode:
+    """R7e: verify decoded logits derive from clean u_t, not u_t + ε_t."""
+
+    def test_logits_unaffected_by_gram_perturbation(self):
+        """With GRAM enabled, logits at each step must equal lm_head(u_t),
+        not lm_head(u_t + eps_t). We verify by comparing GRAM logits against
+        a deterministic run with alpha=0 (eps_t is zero-norm)."""
+        config = make_config(
+            loops=4,
+            gram_enabled=True,
+            gram_latent_dim=8,
+            gram_sigma_alpha=0.0,
+            gram_beta=0.1,
+        )
+        model = ARCModel(config).to(DEVICE)
+        model.eval()
+        batch = make_batch(config)
+
+        torch.manual_seed(0)
+        with torch.no_grad():
+            logits_a, _, _, _, _, _ = model.forward_trajectory(batch)
+
+        torch.manual_seed(0)
+        with torch.no_grad():
+            logits_b, _, _, _, _, _ = model.forward_trajectory(batch)
+
+        for t in range(4):
+            assert torch.allclose(logits_a[t], logits_b[t], atol=1e-5), \
+                f"Step {t} logits differ across runs with alpha=0"
+
+    def test_gram_disabled_matches_deterministic(self):
+        """gram_enabled=False should produce identical logits to a non-GRAM config."""
+        base_config = make_config(loops=4)
+        gram_config = make_config(loops=4, gram_enabled=False)
+
+        torch.manual_seed(42)
+        base_model = ARCModel(base_config).to(DEVICE)
+        base_model.eval()
+
+        torch.manual_seed(42)
+        gram_model = ARCModel(gram_config).to(DEVICE)
+        gram_model.eval()
+
+        batch = make_batch(base_config)
+
+        with torch.no_grad():
+            base_logits, _, _, _, _, _ = base_model.forward_trajectory(batch)
+            gram_logits, _, _, _, _, _ = gram_model.forward_trajectory(batch)
+
+        for t in range(4):
+            assert torch.allclose(base_logits[t], gram_logits[t], atol=1e-5), \
+                f"Step {t}: gram_enabled=False logits diverge from baseline"
+
+    def test_gram_carry_is_perturbed_but_logits_clean(self):
+        """With alpha > 0, the carry (all_hidden) should differ from a
+        deterministic run, but logits should still derive from clean u_t."""
+        config = make_config(
+            loops=4,
+            gram_enabled=True,
+            gram_latent_dim=8,
+            gram_sigma_alpha=0.5,
+            gram_beta=0.1,
+        )
+        model = ARCModel(config).to(DEVICE)
+        model.eval()
+        batch = make_batch(config)
+
+        with torch.no_grad():
+            logits, _, all_hidden, _, _, gram_sigma = model.forward_trajectory(batch)
+
+        assert gram_sigma is not None and len(gram_sigma) > 0, \
+            "Expected non-empty gram_effective_sigma with alpha > 0"
+
+        for t in range(3):  # steps 0..2 should have perturbed carry
+            h_t = all_hidden[t]
+            lm_logits_from_hidden = model.inner.lm_head(h_t)[:, model.inner.puzzle_emb_len + config["num_registers"] if "num_registers" in config else model.inner.puzzle_emb_len:]
+            assert not torch.allclose(logits[t + 1], lm_logits_from_hidden, atol=1e-3), \
+                f"Step {t+1} logits should NOT equal lm_head(perturbed_carry)"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

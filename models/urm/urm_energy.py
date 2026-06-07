@@ -468,33 +468,42 @@ class ARCModel(nn.Module):
                 # URM update: input re-injection + transformer pass
                 pre_t = hidden + input_embeddings
 
-                # GRAM: stochastic latent perturbation
+                # Deterministic forward: u_t = transformer(pre_t)
+                u_t = pre_t
+                for layer in self.inner.layers:
+                    u_t = layer(hidden_states=u_t, **seq_info)
+
+                # Decode from clean u_t (never from perturbed state)
+                logits = self.inner.lm_head(u_t)[:, P + R:]
+                q_logits = self.inner.q_head(u_t[:, 0]).to(torch.float32).squeeze(-1)
+
+                # GRAM: stochastic perturbation applied to carry only
                 if self.config.gram_enabled:
                     k = self.config.gram_latent_dim
                     if k > 0:
-                        # R7c: per-example bottleneck — pool across positions, sample [B, k], broadcast
-                        pooled = pre_t.mean(dim=1)  # [B, H]
-                        mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pooled))  # [B, k] each
+                        # R7c: per-example bottleneck — condition on u_t (post-transformer)
+                        pooled = u_t.mean(dim=1)  # [B, H]
+                        mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pooled))
 
                         if use_posterior:
                             pooled_label = gram_label_emb.mean(dim=1)  # [B, H]
-                            posterior_input = torch.cat([pooled, pooled_label], dim=-1)  # [B, 2H]
+                            posterior_input = torch.cat([pooled, pooled_label], dim=-1)
                             mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
-                            z = self._gram_reparam(mu_q, logvar_q)  # [B, k]
+                            z = self._gram_reparam(mu_q, logvar_q)
                             if self.config.gram_detach_posterior_recon:
                                 z = z.detach()
-                            kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)  # [B]
+                            kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)
                             all_gram_kl.append(kl_t.mean())
                         else:
-                            z = self._gram_reparam(mu_p, logvar_p)  # [B, k]
+                            z = self._gram_reparam(mu_p, logvar_p)
 
-                        eps_t = self.gram_up_proj(z).unsqueeze(1).expand_as(pre_t)  # [B, P+seq, H]
+                        eps_t = self.gram_up_proj(z).unsqueeze(1).expand_as(u_t)
                     else:
-                        # R7a/R7b: per-position full-H eps
-                        mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pre_t))
+                        # Per-position full-H eps — condition on u_t
+                        mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(u_t))
 
                         if use_posterior:
-                            posterior_input = torch.cat([pre_t, gram_label_emb], dim=-1)
+                            posterior_input = torch.cat([u_t, gram_label_emb], dim=-1)
                             mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
                             eps_t = self._gram_reparam(mu_q, logvar_q)
                             if self.config.gram_detach_posterior_recon:
@@ -504,50 +513,20 @@ class ARCModel(nn.Module):
                         else:
                             eps_t = self._gram_reparam(mu_p, logvar_p)
 
-                    if self.config.gram_predecode:
-                        # R7b: decode from deterministic state BEFORE eps injection.
-                        # Run transformer on un-perturbed pre_t, decode, THEN add eps to carry.
-                        det_hidden = pre_t
-                        for layer in self.inner.layers:
-                            det_hidden = layer(hidden_states=det_hidden, **seq_info)
+                    # Rescale eps: σ = α · ‖u_t − hidden‖ (delta-norm-proportional)
+                    if self.config.gram_sigma_alpha > 0:
+                        delta_norm_t = (u_t - hidden).norm(dim=-1).mean(dim=-1)  # [B]
+                        eps_flat = eps_t.reshape(eps_t.shape[0], -1)
+                        eps_norm = eps_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                        eps_unit = eps_flat / eps_norm
+                        scale = self.config.gram_sigma_alpha * delta_norm_t
+                        eps_t = (eps_unit * scale.unsqueeze(-1)).reshape_as(eps_t)
+                        all_gram_effective_sigma.append(scale.mean().detach())
 
-                        logits = self.inner.lm_head(det_hidden)[:, P + R:]
-                        q_logits = self.inner.q_head(det_hidden[:, 0]).to(torch.float32).squeeze(-1)
-
-                        # R7d: rescale eps by alpha * delta_norm (calibration + annealing)
-                        if self.config.gram_sigma_alpha > 0:
-                            # delta_norm: per-position L2 norm of deterministic update, mean over positions → [B]
-                            delta_norm_t = (det_hidden - hidden).norm(dim=-1).mean(dim=-1)  # [B]
-                            # Normalize eps to unit norm per example, rescale to alpha * delta_norm
-                            eps_flat = eps_t.reshape(eps_t.shape[0], -1)  # [B, P*H]
-                            eps_norm = eps_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)  # [B, 1]
-                            eps_unit = eps_flat / eps_norm  # [B, P*H]
-                            scale = self.config.gram_sigma_alpha * delta_norm_t  # [B]
-                            eps_t = (eps_unit * scale.unsqueeze(-1)).reshape_as(eps_t)
-                            all_gram_effective_sigma.append(scale.mean().detach())
-
-                        # Carry: perturbed state for next step (eps influences future steps only)
-                        if step < N - 1:
-                            hidden = det_hidden + eps_t
-                        else:
-                            hidden = det_hidden
-                    else:
-                        # R7a: original — eps injected before transformer, decoded from post-eps state
-                        pre_t = pre_t + eps_t
-
-                        hidden = pre_t
-                        for layer in self.inner.layers:
-                            hidden = layer(hidden_states=hidden, **seq_info)
-
-                        logits = self.inner.lm_head(hidden)[:, P + R:]
-                        q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32).squeeze(-1)
+                    # Carry: perturbed for next step, clean at last step
+                    hidden = u_t + eps_t if step < N - 1 else u_t
                 else:
-                    hidden = pre_t
-                    for layer in self.inner.layers:
-                        hidden = layer(hidden_states=hidden, **seq_info)
-
-                    logits = self.inner.lm_head(hidden)[:, P + R:]
-                    q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32).squeeze(-1)
+                    hidden = u_t
 
                 # Recurrence noise: additive Gaussian on hidden state (training only)
                 if self.config.recurrence_noise > 0 and self.training:

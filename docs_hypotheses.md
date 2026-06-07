@@ -1577,3 +1577,37 @@ Baseline: R7c2 (anti-refining, 0.40% eval exact), R4d (21.25% eval exact).
 6. **Accuracy is low** (0.17% at step 500) — expected; R4d baseline is also at noise floor this early. The question is whether the non-degrading curve translates to competitive final accuracy after 80K steps.
 
 **Conclusion:** The delta-norm calibration eliminates the anti-refinement pathology. Stochastic latent transitions are compatible with URM recurrence when subordinated to the convergence dynamics. Full 80K run will determine whether they help (improve eval or pass@K vs deterministic R4d) or are neutral.
+
+### R7d full-run result (80K steps) — NEGATIVE
+
+**Result:** Eval exact 11.83% vs R4d baseline 21.25% (−9.42pp). Train exact 47.70% (train/eval ratio 4.03× vs R4d's 2.24×).
+
+Despite fixing anti-refinement, R7d still pays a large accuracy tax. Delta norms are 5-7× larger than R4d throughout training — the model never converges to the tight fixed points that R4d finds. The perturbation prevents the trajectory from settling, even when calibrated.
+
+**Root cause analysis:** Two structural bugs in R7d's GRAM implementation:
+1. **Calibration mismatch:** σ was computed from the pre-forward delta (‖pre_t − hidden‖) but ε was injected post-forward. The calibration target and injection point were different operations.
+2. **Decode corruption:** With `gram_predecode=true`, logits were decoded from a state that had been perturbed in the previous step's carry. The prediction path was contaminated by stochastic noise even though the intent was to decode from deterministic states.
+
+These bugs mean R7d didn't actually test "clean GRAM" — it tested a hybrid where noise leaked into both the calibration signal and the decoding path. → R7e.
+
+### R7e — GRAM-faithful clean decode (fixes R7d structural bugs)
+
+Date: 2026-06-07
+Config: `config/arch/urm_r7e_gram_cleandecode_h128.yaml`
+Baseline: R4d (21.25% eval exact), R7d (11.83% eval exact — negative).
+
+**Two structural fixes vs R7d:**
+1. **Decode from clean u_t:** The forward loop now computes u_t = transformer(hidden + input_emb), decodes logits from u_t immediately, THEN computes ε and sets carry = u_t + ε_t. Logits never see perturbation noise. This is faithful to the GRAM paper where the generative model decodes from the deterministic state.
+2. **σ calibrated at injection point:** σ_t = α · ‖u_t − hidden‖ where u_t is the post-transformer state. The calibration and injection now reference the same quantities.
+
+**What this eliminates:** The `gram_predecode` flag and its associated branching. R7e is a clean cutover — one code path, no legacy mode. The old `gram_predecode` config field is retained for backward-compat with old YAML configs but is no longer read.
+
+**Hypothesis:** R7d's −9.42pp accuracy tax was an artifact of decode corruption and calibration mismatch, not an inherent property of stochastic latent transitions. If R7e recovers to near R4d accuracy while maintaining stochastic diversity, the door reopens for GRAM as a pass@K mechanism.
+
+**Null hypothesis:** Even with clean decode, perturbation prevents convergence to tight fixed points and accuracy remains well below R4d. This would close the GRAM line entirely — the recurrence's value IS its deterministic convergence, and any perturbation (however small or well-calibrated) trades accuracy for nothing.
+
+**Held fixed:** k=16 bottleneck, α=0.2, β=0.1, KL warmup 1500 steps, h=128, loops=8.
+
+**Params:** ~168K (identical to R7d — only control flow changed, no new parameters).
+
+**Verified:** 54/54 tests pass, including 3 new clean-decode tests asserting: (1) GRAM logits are reproducible with α=0, (2) gram_enabled=False matches non-GRAM baseline, (3) carry is perturbed but logits derive from clean u_t.

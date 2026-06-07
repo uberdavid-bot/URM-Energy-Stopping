@@ -78,6 +78,10 @@ class ARCModelConfig(BaseModel):
     gram_kl_warmup_steps: int = 0
     # R7c2: free-bits floor (nats); KL penalized only above this threshold
     gram_free_bits: float = 0.0
+    # R7d: delta-norm-proportional sigma — eps magnitude = alpha * ||delta_t|| (per-example)
+    # When > 0, overrides learned sigma: eps is normalized to unit norm and rescaled by alpha * delta_norm_t.
+    # Provides calibration (eps is a small fraction of the update) and annealing (shrinks with convergence).
+    gram_sigma_alpha: float = 0.0
     # Diagnostic: run posterior-conditioned eval pass to confirm leak (temporary probe)
     gram_posterior_eval_probe: bool = False
 
@@ -455,6 +459,7 @@ class ARCModel(nn.Module):
         all_q_logits = []
         all_hidden = []
         all_gram_kl = []
+        all_gram_effective_sigma = []  # R7d: per-step effective injection scale
 
         for step in range(N):
             if self.config.refinement == "urm" or (
@@ -509,6 +514,18 @@ class ARCModel(nn.Module):
                         logits = self.inner.lm_head(det_hidden)[:, P + R:]
                         q_logits = self.inner.q_head(det_hidden[:, 0]).to(torch.float32).squeeze(-1)
 
+                        # R7d: rescale eps by alpha * delta_norm (calibration + annealing)
+                        if self.config.gram_sigma_alpha > 0:
+                            # delta_norm: per-position L2 norm of deterministic update, mean over positions → [B]
+                            delta_norm_t = (det_hidden - hidden).norm(dim=-1).mean(dim=-1)  # [B]
+                            # Normalize eps to unit norm per example, rescale to alpha * delta_norm
+                            eps_flat = eps_t.reshape(eps_t.shape[0], -1)  # [B, P*H]
+                            eps_norm = eps_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)  # [B, 1]
+                            eps_unit = eps_flat / eps_norm  # [B, P*H]
+                            scale = self.config.gram_sigma_alpha * delta_norm_t  # [B]
+                            eps_t = (eps_unit * scale.unsqueeze(-1)).reshape_as(eps_t)
+                            all_gram_effective_sigma.append(scale.mean().detach())
+
                         # Carry: perturbed state for next step (eps influences future steps only)
                         if step < N - 1:
                             hidden = det_hidden + eps_t
@@ -549,7 +566,8 @@ class ARCModel(nn.Module):
             all_hidden.append(hidden)
 
         gram_kl = all_gram_kl if all_gram_kl else None
-        return all_logits, all_q_logits, all_hidden, input_embeddings, gram_kl
+        gram_effective_sigma = all_gram_effective_sigma if all_gram_effective_sigma else None
+        return all_logits, all_q_logits, all_hidden, input_embeddings, gram_kl, gram_effective_sigma
 
     def forward_gram_samples(self, batch: Dict[str, torch.Tensor], M: int):
         """Run M independent prior-sampled trajectories (eval only).
@@ -561,7 +579,7 @@ class ARCModel(nn.Module):
         all_preds = []
         all_q_logits = []
         for _ in range(M):
-            logits_list, q_list, _, _, _ = self.forward_trajectory(batch)
+            logits_list, q_list, _, _, _, _ = self.forward_trajectory(batch)
             final_preds = torch.argmax(logits_list[-1], dim=-1)
             final_q = q_list[-1]
             all_preds.append(final_preds)

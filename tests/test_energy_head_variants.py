@@ -54,7 +54,7 @@ class TestEnergyHeadVariants:
         batch = make_batch(config)
 
         with torch.no_grad():
-            _, _, all_hidden, input_emb, _ = model.forward_trajectory(batch)
+            _, _, all_hidden, input_emb, _, _ = model.forward_trajectory(batch)
             P = model.inner.puzzle_emb_len
             energy = model.compute_joint_energy(input_emb, all_hidden[-1][:, P:])
 
@@ -70,7 +70,7 @@ class TestEnergyHeadVariants:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        _, _, all_hidden, input_emb, _ = model.forward_trajectory(batch)
+        _, _, all_hidden, input_emb, _, _ = model.forward_trajectory(batch)
         P = model.inner.puzzle_emb_len
         energy = model.compute_joint_energy(input_emb, all_hidden[-1][:, P:])
         energy.sum().backward()

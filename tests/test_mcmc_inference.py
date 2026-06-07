@@ -57,7 +57,7 @@ class TestForwardTrajectory:
         batch = make_batch(config)
 
         with torch.no_grad():
-            all_logits, all_q_logits, all_hidden, input_emb, _ = model.forward_trajectory(batch)
+            all_logits, all_q_logits, all_hidden, input_emb, _, _ = model.forward_trajectory(batch)
 
         assert len(all_logits) == 4
         assert len(all_q_logits) == 4
@@ -81,7 +81,7 @@ class TestForwardTrajectory:
         batch = make_batch(config)
 
         with torch.no_grad():
-            all_logits, _, _, _, _ = model.forward_trajectory(batch)
+            all_logits, _, _, _, _, _ = model.forward_trajectory(batch)
 
         for t in range(3):
             assert not torch.allclose(all_logits[t], torch.zeros_like(all_logits[t]), atol=1e-5)
@@ -93,7 +93,7 @@ class TestForwardTrajectory:
         batch = make_batch(config)
 
         with torch.no_grad():
-            _, _, all_hidden, _, _ = model.forward_trajectory(batch)
+            _, _, all_hidden, _, _, _ = model.forward_trajectory(batch)
 
         for t in range(1, 4):
             assert not torch.allclose(all_hidden[t], all_hidden[t - 1], atol=1e-5), (
@@ -107,7 +107,7 @@ class TestForwardTrajectory:
         batch = make_batch(config)
 
         with torch.no_grad():
-            all_logits, _, _, _, _ = model.forward_trajectory(batch, N=3)
+            all_logits, _, _, _, _, _ = model.forward_trajectory(batch, N=3)
 
         assert len(all_logits) == 3
 
@@ -119,7 +119,7 @@ class TestGradientFlow:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        all_logits, _, _, _, _ = model.forward_trajectory(batch)
+        all_logits, _, _, _, _, _ = model.forward_trajectory(batch)
 
         # Loss on final step only — gradients must flow back through steps 1-3
         labels = batch["labels"]
@@ -141,7 +141,7 @@ class TestGradientFlow:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        all_logits, _, all_hidden, _, _ = model.forward_trajectory(batch)
+        all_logits, _, all_hidden, _, _, _ = model.forward_trajectory(batch)
 
         # Compute loss only on step 3
         labels = batch["labels"]
@@ -173,7 +173,7 @@ class TestEBTMode:
         batch = make_batch(config)
 
         with torch.no_grad():
-            all_logits, _, all_hidden, _, _ = model.forward_trajectory(batch)
+            all_logits, _, all_hidden, _, _, _ = model.forward_trajectory(batch)
 
         assert len(all_logits) == 4
         for t in range(4):
@@ -186,7 +186,7 @@ class TestEBTMode:
         batch = make_batch(config)
 
         with torch.no_grad():
-            _, _, all_hidden, _, _ = model.forward_trajectory(batch)
+            _, _, all_hidden, _, _, _ = model.forward_trajectory(batch)
 
         assert not torch.allclose(all_hidden[0], all_hidden[1], atol=1e-5), (
             "EBT should change hidden states between steps"
@@ -198,7 +198,7 @@ class TestEBTMode:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        all_logits, _, _, _, _ = model.forward_trajectory(batch)
+        all_logits, _, _, _, _, _ = model.forward_trajectory(batch)
 
         labels = batch["labels"]
         loss = torch.nn.functional.cross_entropy(
@@ -220,7 +220,7 @@ class TestHybridMode:
         batch = make_batch(config)
 
         with torch.no_grad():
-            all_logits, _, _, _, _ = model.forward_trajectory(batch)
+            all_logits, _, _, _, _, _ = model.forward_trajectory(batch)
 
         assert len(all_logits) == 6
 
@@ -230,7 +230,7 @@ class TestHybridMode:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        all_logits, _, _, _, _ = model.forward_trajectory(batch)
+        all_logits, _, _, _, _, _ = model.forward_trajectory(batch)
 
         # Deep supervision: loss at every step
         labels = batch["labels"]

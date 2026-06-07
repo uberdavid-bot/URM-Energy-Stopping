@@ -67,7 +67,7 @@ class EnergyLossHead(nn.Module):
         """
         N = self.model.config.loops
         labels = batch["labels"]
-        all_logits, all_q_logits, all_hidden, input_embeddings, gram_kl = self.model.forward_trajectory(
+        all_logits, all_q_logits, all_hidden, input_embeddings, gram_kl, gram_effective_sigma = self.model.forward_trajectory(
             batch, N, labels=labels if self.training else None
         )
         P = self.model.inner.puzzle_emb_len
@@ -273,6 +273,10 @@ class EnergyLossHead(nn.Module):
             # R7a: GRAM metrics
             if gram_kl_mean is not None:
                 metrics["gram_kl"] = gram_kl_mean.detach() * metrics["count"]
+            # R7d: per-step effective injection sigma (mean across steps)
+            if gram_effective_sigma is not None and len(gram_effective_sigma) > 0:
+                sigma_eff_mean = torch.stack(gram_effective_sigma).mean()
+                metrics["gram_sigma_effective"] = sigma_eff_mean * metrics["count"]
             if self.model.config.gram_enabled:
                 with torch.no_grad():
                     sample_pre = all_hidden[0] + input_embeddings
@@ -309,7 +313,7 @@ class EnergyLossHead(nn.Module):
 
             # Posterior eval probe: run one pass with posterior forced on to confirm leak
             if self.model.config.gram_posterior_eval_probe:
-                post_logits, _, _, _, _ = self.model.forward_trajectory(
+                post_logits, _, _, _, _, _ = self.model.forward_trajectory(
                     batch, N, labels=labels, force_posterior=True
                 )
                 post_final_preds = torch.argmax(post_logits[-1], dim=-1)

@@ -133,7 +133,7 @@ def main():
             loss_counts = mask.sum(-1)
             valid = (loss_counts > 0) & (batch["puzzle_identifiers"] != blank_id)
 
-            all_logits, all_q_logits, all_hidden, _, _ = arc_model.forward_trajectory(
+            all_logits, all_q_logits, all_hidden, _, _, _ = arc_model.forward_trajectory(
                 batch, N=N_STEPS
             )
 

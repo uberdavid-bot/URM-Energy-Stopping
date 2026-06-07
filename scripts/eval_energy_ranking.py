@@ -132,7 +132,7 @@ def main():
             batch = {k: v.cuda() for k, v in batch.items()}
 
             # Run full trajectory
-            all_logits, all_q_logits, all_hidden, input_embeddings, _ = arc_model.forward_trajectory(batch, N=8)
+            all_logits, all_q_logits, all_hidden, input_embeddings, _, _ = arc_model.forward_trajectory(batch, N=8)
 
             # Energy at steps 1, 6, and 8
             energy_step1 = arc_model.compute_joint_energy(input_embeddings, all_hidden[0][:, P:])

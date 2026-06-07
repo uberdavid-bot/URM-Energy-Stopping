@@ -108,6 +108,18 @@ The codebase has been streamlined to only the active experiment pipeline:
 ### Flat trajectory forward architecture
 `ARCModel.forward_trajectory(batch, N)` is the primary entry point. Runs N recurrence steps in a single call with full gradient flow. `EnergyLossHead.forward(batch)` calls `forward_trajectory` and computes deep supervision loss, per-step metrics, and eval stopping metrics. No carry state, no per-sample halting, no outer loop.
 
+**Return signature (6-tuple):**
+```
+(all_logits, all_q_logits, all_hidden, input_embeddings, gram_kl, gram_effective_sigma)
+  - all_logits: list of N tensors [B, seq_len, vocab_size]
+  - all_q_logits: list of N tensors [B]
+  - all_hidden: list of N tensors [B, P+R+seq, H]
+  - input_embeddings: [B, P+R+seq, H]
+  - gram_kl: list of N scalars (training + gram_enabled) or None
+  - gram_effective_sigma: list of per-step scalars (gram_sigma_alpha > 0) or None
+```
+All callers must unpack all 6 elements. When adding/removing return values, update: `models/losses.py`, all `tests/test_*.py`, all `scripts/*.py` that call `forward_trajectory`.
+
 Three model config fields control behavior:
 - **`refinement`**: `"urm"` (one transformer pass) | `"ebt"` (one MCMC gradient step) | `"hybrid"` (URM if step < mcmc_start_step, else MCMC) — what one step does.
 - **`stopping`**: `"qhalt"` (learned halt signal) | `"energy"` (energy convergence) — eval-only stopping criterion.
@@ -154,8 +166,19 @@ Two pretrain config fields control gradient clipping:
 - **`grad_clip_backbone`**: float (default 5.0). Max gradient norm for backbone parameters.
 - **`grad_clip_energy_head`**: float (default 1.0). Max gradient norm for energy head parameters. Name-based filtering (`'energy_head' in param_name`) covers all energy head variants.
 
-### Per-step metrics
+### Per-step metrics and step selection
 Per-step metrics are computed inside `EnergyLossHead` for both train and eval: `step_k_accuracy`, `step_k_exact_accuracy`, `step_k_delta_norm`. Eval mode additionally computes stopping metrics: `qhalt_stop_step`, `qhalt_stop_accuracy`, `energy_stop_step`, `energy_stop_accuracy`.
+
+**All primary eval metrics read final step N** (`all_logits[-1]`): `exact_accuracy`, `pass@k`, `maj@k`, `gram_majority_exact`, `gram_qhalt_bestof_exact`. Only `qhalt_stop_accuracy` and `energy_stop_accuracy` use cross-step selection (argmax across steps by confidence signal).
+
+### Eval aggregation (evaluators/arc.py)
+The N-augmentation loop lives OUTSIDE the model — the dataset provides 1000 augmentations per puzzle. `arc.py` collects predictions across augmentations:
+1. Each prediction is inverse-augmented to canonical form and grid-hashed
+2. Identical grids across augmentations are deduped; Q and energy confidence are averaged
+3. **pass@K** (Q-based): sort unique grids by `(count, avg_q, max_q_log_prob, avg_energy_conf)` descending, check if ground truth is in top K
+4. **pass@K** (energy-based): sort by `avg_energy_conf` descending
+5. **maj@K**: Q-halt-weighted sampling (`softmax(logsigmoid(q))`), picks highest `q_log_prob` among the sample — this is NOT majority vote despite the metric name; it's Q-weighted best-of-N
+6. **GRAM multi-trajectory eval** (`forward_gram_samples`) is a SEPARATE path that runs `M=gram_num_samples` extra forward passes per batch with independent prior samples — does NOT go through arc.py's augmentation dedup. Reports `gram_majority_exact` (per-position mode across M trajectories) and `gram_qhalt_bestof_exact` (trajectory with highest Q-halt)
 
 ### Standard backbone: R4e h=160 (the current best, pass@1 27.92% / pass@1000 48.05% at 80K steps)
 **Current best backbone**: depth=1, **h=160**, expansion=2, 8 steps, num_heads=4 (head_dim=40), attn_dropout=0.1, mlp_dropout=0.1. **~211K params**. `config/arch/urm_r4e_h160.yaml`. Results: **eval exact 23.72%** (step 8), **24.09% peak (step 6)**, train exact 56.25%, train/eval ratio 2.37×, pass@1 27.92%, pass@1000 48.05%. Runtime ~2h 38m on 3090.
@@ -234,3 +257,10 @@ python -m data.build_arc_dataset \
 ```bash
 conda activate urm && python -m pytest tests/ -v
 ```
+
+### Script boilerplate patterns
+When writing smoke tests or one-off scripts:
+- **Metadata**: `json.load(open(os.path.join(DATA_PATH, "train", "dataset.json")))` → `PuzzleDatasetMetadata(**data)`. There is no `.load()` method.
+- **Dataset split names**: `"train"`, not `"training"`
+- **Model loading**: `load_model_class("urm.urm_energy@ARCModel")` — not `load_model_class(get_model_source_path(...))`
+- **DataLoader yields tuples**: `(set_name, batch, global_batch_size)`, not bare batches. Unpack with `_, batch, _ = next(dataloader)`.

@@ -1,0 +1,45 @@
+# R7c2 — Disambiguation smoke: is R7c's KL collapse from suppression or no signal?
+# R7c closed the leak (k=16 bottleneck) but gram_kl collapsed to 0 immediately.
+# Two changes to let the posterior actually learn:
+#   1. gram_detach_posterior_recon: false — recon gradients shape the posterior again
+#      (bottleneck prevents full-answer encoding, so detach is over-killing)
+#   2. gram_kl_warmup_steps: 1500 — ramp beta 0→0.1, prevents tiny-KL crush at init
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+  energy_loss_weight: 0.0
+  ranking_margin: 0.1
+
+loops: 8
+num_layers: 1
+hidden_size: 128
+num_heads: 4
+expansion: 2
+
+attn_dropout: 0.1
+mlp_dropout: 0.1
+recurrence_noise: 0.0
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+energy_threshold: 0.005
+min_steps: 8
+
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+
+gram_enabled: true
+gram_beta: 0.1
+gram_mlp_hidden: 64
+gram_num_samples: 8
+gram_latent_dim: 16
+gram_predecode: true
+gram_detach_posterior_recon: false
+gram_kl_warmup_steps: 1500
+gram_free_bits: 0.0
+
+ema: True
+ema_rate: 0.999

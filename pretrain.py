@@ -481,6 +481,7 @@ def train_batch(
     batch = {k: v.cuda() for k, v in batch.items()}
 
     # Forward — loss head runs full trajectory internally
+    train_state.model.current_step = train_state.step
     _, loss, metrics, _, _ = train_state.model(
         batch=batch, return_keys=[]
     )

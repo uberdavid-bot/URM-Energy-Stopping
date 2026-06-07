@@ -74,6 +74,10 @@ class ARCModelConfig(BaseModel):
     gram_predecode: bool = False
     # R7b: stop recon-loss gradients from flowing into posterior MLP (KL-only posterior shaping)
     gram_detach_posterior_recon: bool = False
+    # R7c2: KL warmup — linear ramp beta: 0 -> gram_beta over N steps; 0 = no warmup
+    gram_kl_warmup_steps: int = 0
+    # R7c2: free-bits floor (nats); KL penalized only above this threshold
+    gram_free_bits: float = 0.0
     # Diagnostic: run posterior-conditioned eval pass to confirm leak (temporary probe)
     gram_posterior_eval_probe: bool = False
 

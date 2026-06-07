@@ -1452,3 +1452,73 @@ R7a comparison: step_8_exact → 1.0 within 300 steps, gram_kl spiked to 73. R7c
 KL collapsed to ~0 by step 500 — posterior collapsed to prior. Expected: with `gram_detach_posterior_recon=True`, the posterior only gets KL gradients, and 16 dims can't encode the answer, so there's no gradient signal to keep the posterior active. Prior sigma stayed at ~1.05 (initialization, no collapse).
 
 The learning curve matches the deterministic baseline at equivalent early training (~0 exact at <1000 effective steps, which is where R4d also shows ~0). Full run needed to determine if GRAM adds value beyond baseline (outcome a vs b).
+
+---
+
+### R7c2 — Posterior collapse disambiguation (warmup + no-detach)
+
+Date: 2026-06-06
+Config: `config/arch/urm_r7c2_gram_nodetach_warmup_h128.yaml`
+Baseline: R7c (leak closed, but gram_kl collapsed to 0 immediately).
+
+**Diagnosis of R7c KL collapse:** R7c closed the leak but the posterior collapsed to the prior (gram_kl → 0 by step 500, gram_sigma_mean stuck at 1.05). Two config choices likely suppressed the signal before it could form:
+1. `gram_detach_posterior_recon=True` removed the only gradient pushing the posterior to encode useful info — with the bottleneck already preventing the full-answer leak, the detach over-kills it (KL only pulls toward prior, nothing pushes the other way).
+2. `gram_beta=0.1` flat from step 0, applied to a [B, k=16] KL that is ~512× smaller scale than the per-position version it was tuned for, crushes any nascent KL structure.
+
+**This is a disambiguation test**, not a new architecture. Goal: determine whether KL can stay positive-and-stable with the leak still closed.
+
+**Changes from R7c:**
+- `gram_detach_posterior_recon: false` — let recon gradients shape the posterior again (bottleneck prevents full-answer encoding)
+- `gram_kl_warmup_steps: 1500` — linear ramp beta: 0 → 0.1 over 1500 steps (gives posterior time to learn before being regularized)
+- New infra: `gram_free_bits` (nats floor for KL penalty, off in this variant)
+
+**Two smoke variants tested:**
+1. Warmup (this config): `gram_kl_warmup_steps=1500, gram_free_bits=0.0`
+2. Free-bits fallback: `gram_kl_warmup_steps=0, gram_free_bits=1.0` (floor holds KL up)
+
+**Interpretation branches:**
+- **(a) Leak closed AND gram_kl stays positive/stable in either variant** → that config is launch-worthy; eps is doing something and the full run can test outcome (a) vs (b) for real.
+- **(b) Leak closed but gram_kl collapses to 0 in both variants** → earned outcome (b): even with nothing suppressing it, the posterior finds no target-conditioned trajectory signal on single-target ARC. Publishable negative.
+- **(c) Leak reopens (step saturation) with detach off** → the bottleneck alone isn't leak-tight without the detach; need to reconsider.
+
+Success criteria:
+1. No leak: step_8_exact stays at noise floor (NOT saturating to 1.0)
+2. gram_kl stays > 0.01 through step 500+ in at least one variant
+3. gram_sigma_mean moves off 1.0 (prior is learning input-dependent structure)
+
+### Result
+
+**Unambiguously outcome (a): leak closed, KL positive and stable.** Both variants pass all three success criteria. This config is launch-worthy.
+
+**Warmup variant** (wandb `awhky3pg`, `gram_kl_warmup_steps=1500, gram_free_bits=0.0`):
+
+| Step | train s8_ex | train gram_kl | train sigma | eval s8_ex | eval recon |
+|------|-------------|---------------|-------------|------------|------------|
+| 100 | 0.000 | 1.648 | 1.008 | — | — |
+| 500 | 0.000 | 5.719 | 0.309 | — | — |
+| 1000 | 0.000 | 8.000 | 0.229 | — | — |
+| 1500 | 0.000 | 8.938 | 0.217 | — | — |
+| 2000 | 0.000 | 6.656 | 0.186 | 0.000 | 2.203 |
+| 5000 | 0.016 | 6.750 | 0.151 | — | — |
+| 9900 | 0.125 | 6.438 | 0.132 | 0.000 | 2.946 |
+
+**Free-bits variant** (wandb `jr6a5ngg`, `gram_kl_warmup_steps=0, gram_free_bits=1.0`):
+
+| Step | train s8_ex | train gram_kl | train sigma | eval s8_ex | eval recon |
+|------|-------------|---------------|-------------|------------|------------|
+| 100 | 0.000 | 1.742 | 1.008 | — | — |
+| 500 | 0.000 | 3.906 | 0.377 | — | — |
+| 1000 | 0.000 | 6.469 | 0.254 | — | — |
+| 1500 | 0.000 | 8.250 | 0.226 | — | — |
+| 2000 | 0.000 | 6.344 | 0.195 | 0.000 | 2.173 |
+| 5000 | 0.016 | 6.594 | 0.155 | — | — |
+| 9900 | 0.094 | 6.438 | 0.133 | 0.000 | 2.921 |
+
+**Interpretation:**
+1. **No leak**: step_8_exact stays at noise floor in both train and eval — bottleneck alone (without detach) is leak-tight.
+2. **KL positive and stable**: gram_kl rises to 6-9 nats by step 1000, holds through 10K. The posterior IS encoding target-conditioned information (contrast with R7c where KL collapsed to 0 by step 500).
+3. **Prior learning**: gram_sigma_mean drops 1.0 → 0.13 — the prior is learning input-dependent structure, not stuck at unit Gaussian.
+4. **Both variants near-identical**: warmup ramps slightly faster (sigma 0.309 vs 0.377 at step 500) but the asymptotic behavior converges. Warmup is the cleaner mechanism (principled β scheduling vs KL floor).
+5. **Eval exact accuracy ≈ 0**: expected at 10K steps with h=128 — the R4d h=128 baseline takes ~20K steps to show meaningful eval accuracy. A full 80K run is needed to assess whether GRAM improves the downstream task.
+
+**Next step**: Full 80K training run with the warmup config to compare against R4d h=128 baseline (21.25% eval exact). The key question shifts from "can the posterior learn?" (yes) to "does stochastic trajectory diversity improve eval accuracy or pass@K?"

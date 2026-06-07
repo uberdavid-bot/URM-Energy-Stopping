@@ -47,6 +47,7 @@ class EnergyLossHead(nn.Module):
         self.model = model
         self.loss_fn = globals()[loss_type]
         self.energy_loss_weight = energy_loss_weight
+        self.current_step = 0
         self.ranking_margin = ranking_margin
         self.shuffle_trajectory_quality = shuffle_trajectory_quality  # A2 ablation
         self.detach_energy_hidden = detach_energy_hidden  # A3 ablation
@@ -117,11 +118,18 @@ class EnergyLossHead(nn.Module):
             )
             total_loss = total_loss + self.energy_loss_weight * ranking_loss
 
-        # R7a: GRAM KL loss
+        # R7a: GRAM KL loss (with R7c2 warmup + free-bits)
         gram_kl_mean = None
         if gram_kl is not None and len(gram_kl) > 0:
             gram_kl_mean = torch.stack(gram_kl).mean()
-            total_loss = total_loss + self.model.config.gram_beta * gram_kl_mean
+            cfg = self.model.config
+            effective_beta = cfg.gram_beta
+            if cfg.gram_kl_warmup_steps > 0:
+                effective_beta = cfg.gram_beta * min(1.0, self.current_step / cfg.gram_kl_warmup_steps)
+            penalized_kl = gram_kl_mean
+            if cfg.gram_free_bits > 0:
+                penalized_kl = torch.clamp(gram_kl_mean, min=cfg.gram_free_bits)
+            total_loss = total_loss + effective_beta * penalized_kl
 
         # --- Metrics (no_grad) ---
         with torch.no_grad():

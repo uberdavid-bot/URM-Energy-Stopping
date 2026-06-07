@@ -100,7 +100,7 @@ The codebase has been streamlined to only the active experiment pipeline:
   - Backbone probes at h=96: `urm_r4a_registers_h96.yaml`, `urm_r4b_xsa_h96.yaml`, `urm_r4c_loops16_h96.yaml`
   - Width sweep (best-performing axis): `urm_r4d_h128.yaml`, `urm_r4e_h160.yaml`, `urm_r4f_h128_regularized.yaml`, `urm_r5a_h192.yaml`, `urm_r5b_h128_loops16.yaml`, `urm_r5c_h160_long.yaml`
   - Attention architecture sweep at h=128: `urm_r6a_sink_h128.yaml`, `urm_r6b_temperature_h128.yaml`, `urm_r6c_registers_h128.yaml`, `urm_r6d_heads8_h128.yaml`, `urm_r6e_heads16_h128.yaml`, `urm_r6f_heads2_h128.yaml`, `urm_r6g_partial_rope_h128.yaml`, `urm_r6h_gqa_h128.yaml`
-  - GRAM stochastic latent transitions: `urm_r7a_gram_h128.yaml` (leaked — documented negative), `urm_r7b_gram_predecode_h128.yaml` (two-pass leak — documented negative), `urm_r7c_gram_bottleneck_h128.yaml`
+  - GRAM stochastic latent transitions: `urm_r7a_gram_h128.yaml` (leaked — documented negative), `urm_r7b_gram_predecode_h128.yaml` (two-pass leak — documented negative), `urm_r7c_gram_bottleneck_h128.yaml` (KL collapsed — documented), `urm_r7c2_gram_nodetach_warmup_h128.yaml`
   - Legacy h=64: `urm_r1i_dropout.yaml`, `urm_r2_trajectory.yaml`, `urm_r2b_trajectory_dropout.yaml`, `urm_r2c_pos_mlp.yaml`, `ablation_a1/a2/a3/a4` variants
   - Legacy base: `urm_qhalt.yaml`, `ebt_energy.yaml`
 - **Active scripts**: `scripts/train_r4_backbone_experiments.sh` (R4b + R4c), `scripts/train_r4d_width_sweep.sh` (R4d/e/f), `scripts/train_r5_scale_sweep.sh` (R5a/b/c), `scripts/train_r6_attention_sweep.sh` (R6a-h), `scripts/analyze_failure_modes.py` (failure bucketing diagnostic), `scripts/eval_qhalt_mcmc.py` (R3-diag), `scripts/eval_energy_ranking.py` (energy ranking comparison), plus legacy per-experiment scripts.
@@ -135,7 +135,7 @@ Four loss config fields control energy head co-training (R2+/R2g/R2i):
 - **`ranking_noise_sigma`**: float (default 0.0). R2g: σ sampled per step ~ Uniform(0, ranking_noise_sigma), applied to hidden states before the energy head scores them. Reconstruction path uses clean hidden states. Training only. Breaks the step-index shortcut (R2g-h96: eval Spearman +0.007 → −0.227).
 - **`cross_trajectory`**: bool (default False). R2i: replace within-trajectory ranking with [B, B] same-step all-pairs ranking across augmentations within a batch. When True, the within-trajectory loop in `trajectory_ranking_loss` is skipped entirely; `total_loss = recon + 0.5*qhalt + elw * cross_traj`. Documented negative at h=96 due to train (same-puzzle augs) ≠ eval (heterogeneous puzzles) distribution mismatch.
 
-Seven model config fields control GRAM stochastic latent transitions (R7):
+Nine model config fields control GRAM stochastic latent transitions (R7):
 - **`gram_enabled`**: bool (default false). Enables GRAM prior/posterior VAE perturbation at every URM step. When false, `forward_trajectory` is unchanged.
 - **`gram_beta`**: float (default 0.1). KL loss weight: `total_loss += gram_beta * mean_over_steps(KL_t)`.
 - **`gram_logvar_min`**: float (default -5.0). Clamp floor for logvar output of prior/posterior MLPs.
@@ -145,6 +145,8 @@ Seven model config fields control GRAM stochastic latent transitions (R7):
 - **`gram_latent_dim`**: int (default 0). R7c: per-example bottleneck dimension k. When >0, prior/posterior output [B, 2k] instead of [B, P+seq, 2H], z is sampled as [B, k], projected up via Linear(k→H) and broadcast across positions. When 0, uses R7a/R7b per-position full-H eps.
 - **`gram_predecode`**: bool (default false). R7b fix: decode logits from deterministic state BEFORE eps injection. Breaks the R7a one-pass posterior leak where eps_t (containing target info) was decoded in the same step it was injected. When true, eps_t only influences steps t+1..N after a transformer pass mixes it.
 - **`gram_detach_posterior_recon`**: bool (default false). When true, detaches eps_t for reconstruction loss so only KL shapes the posterior MLP. Guard against posterior encoding the answer via recon-loss gradients.
+- **`gram_kl_warmup_steps`**: int (default 0). R7c2: linear ramp beta: 0 → gram_beta over N steps. 0 = no warmup.
+- **`gram_free_bits`**: float (default 0.0). R7c2: per-batch nats floor for KL penalty. KL penalized as max(raw_kl, free_bits). 0 = off.
 - **`gram_posterior_eval_probe`**: bool (default false). Diagnostic: run eval with posterior forced on (feeding labels) to confirm posterior leak. Logs `gram_posterior_eval_exact`.
 
 Two pretrain config fields control gradient clipping:

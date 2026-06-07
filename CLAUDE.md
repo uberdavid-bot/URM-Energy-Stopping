@@ -100,7 +100,7 @@ The codebase has been streamlined to only the active experiment pipeline:
   - Backbone probes at h=96: `urm_r4a_registers_h96.yaml`, `urm_r4b_xsa_h96.yaml`, `urm_r4c_loops16_h96.yaml`
   - Width sweep (best-performing axis): `urm_r4d_h128.yaml`, `urm_r4e_h160.yaml`, `urm_r4f_h128_regularized.yaml`, `urm_r5a_h192.yaml`, `urm_r5b_h128_loops16.yaml`, `urm_r5c_h160_long.yaml`
   - Attention architecture sweep at h=128: `urm_r6a_sink_h128.yaml`, `urm_r6b_temperature_h128.yaml`, `urm_r6c_registers_h128.yaml`, `urm_r6d_heads8_h128.yaml`, `urm_r6e_heads16_h128.yaml`, `urm_r6f_heads2_h128.yaml`, `urm_r6g_partial_rope_h128.yaml`, `urm_r6h_gqa_h128.yaml`
-  - GRAM stochastic latent transitions: `urm_r7a_gram_h128.yaml`
+  - GRAM stochastic latent transitions: `urm_r7a_gram_h128.yaml` (leaked — documented negative), `urm_r7b_gram_predecode_h128.yaml`
   - Legacy h=64: `urm_r1i_dropout.yaml`, `urm_r2_trajectory.yaml`, `urm_r2b_trajectory_dropout.yaml`, `urm_r2c_pos_mlp.yaml`, `ablation_a1/a2/a3/a4` variants
   - Legacy base: `urm_qhalt.yaml`, `ebt_energy.yaml`
 - **Active scripts**: `scripts/train_r4_backbone_experiments.sh` (R4b + R4c), `scripts/train_r4d_width_sweep.sh` (R4d/e/f), `scripts/train_r5_scale_sweep.sh` (R5a/b/c), `scripts/train_r6_attention_sweep.sh` (R6a-h), `scripts/analyze_failure_modes.py` (failure bucketing diagnostic), `scripts/eval_qhalt_mcmc.py` (R3-diag), `scripts/eval_energy_ranking.py` (energy ranking comparison), plus legacy per-experiment scripts.
@@ -142,6 +142,9 @@ Six model config fields control GRAM stochastic latent transitions (R7):
 - **`gram_logvar_max`**: float (default 2.0). Clamp ceiling for logvar.
 - **`gram_mlp_hidden`**: int (default 64). Hidden width of prior/posterior MLPs (H→mlp_hidden→2H).
 - **`gram_num_samples`**: int (default 8). Number of independent prior-sampled trajectories at eval for majority-vote and Q-halt best-of-N metrics.
+- **`gram_predecode`**: bool (default false). R7b fix: decode logits from deterministic state BEFORE eps injection. Breaks the R7a one-pass posterior leak where eps_t (containing target info) was decoded in the same step it was injected. When true, eps_t only influences steps t+1..N after a transformer pass mixes it.
+- **`gram_detach_posterior_recon`**: bool (default false). When true, detaches eps_t for reconstruction loss so only KL shapes the posterior MLP. Guard against posterior encoding the answer via recon-loss gradients.
+- **`gram_posterior_eval_probe`**: bool (default false). Diagnostic: run eval with posterior forced on (feeding labels) to confirm posterior leak. Logs `gram_posterior_eval_exact`.
 
 Two pretrain config fields control gradient clipping:
 - **`grad_clip_backbone`**: float (default 5.0). Max gradient norm for backbone parameters.

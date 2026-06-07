@@ -1337,5 +1337,59 @@ Metrics to watch:
 - `gram_qhalt_bestof_exact`: best-of-N (by Q-halt) exact accuracy over M trajectories.
 - Standard per-step accuracy curve, pass@K (existing evaluator).
 
-### Result
-TBD
+### Result — Posterior leak (structural failure)
+
+Date: 2026-06-06
+Run: `R7a-gram-h128-260606`, wandb: `uberdavid-personal/arcagi/fllkf3r0`
+Checkpoint: `checkpoints/R7a-gram-h128-260606/step_5355.pt` (killed at ~5520 steps)
+
+**Failure mode: one-pass posterior leak.** The posterior MLP conditions on label embeddings, eps_t is sampled from the posterior and injected BEFORE the transformer pass, and logits are decoded from the transformer output of the same step. This creates a direct information path: target → posterior → eps_t → transformer(pre_t + eps_t) → lm_head → logits. Deep supervision rewards using this shortcut at every step.
+
+**Evidence:**
+- `train/step_8_exact_accuracy` → 1.0 within ~300 steps (R4d baseline: ~0.45 over 80K steps). The 100× faster convergence proves a label shortcut.
+- `train/gram_kl` spikes to ~73 at step ~300 (posterior actively diverging from prior to encode answer), then decays to ~0.7 by step 5000 (posterior collapses to prior once backbone memorizes via puzzle_emb).
+- All eval metrics flat zero: `ARC/pass@K` = 0 at all K, `gram_majority_exact` = 0, `gram_qhalt_bestof_exact` = 0. Prior path learned nothing.
+- Eval token accuracy *decreases* through recurrence steps (26.1% → 12.5% across steps 1-8) — the GRAM perturbation via the prior actively degrades predictions. Compare R4d baseline which improves through steps.
+- `gram_sigma_mean` (prior σ): started at ~1.0, decayed to ~0.74 by step 5355. Prior didn't collapse to zero, but the perturbation it adds is unhelpful noise.
+
+**Mechanism analysis:** The leak is structural, not a hyperparameter issue. The posterior encodes target information into eps_t, the same step's transformer pass processes (pre_t + eps_t), and lm_head decodes the answer from that output. At eval, the prior has no access to labels, so eps_t is uninformative noise. This is the classic VAE posterior shortcut: the decoder learns to bypass the prior by routing information through the posterior, and the prior never receives useful gradients.
+
+**Posterior eval probe (step 5355 EMA checkpoint):** Prior eval exact = 0.00%, posterior eval exact = 0.01%. Both near-zero because (a) the checkpoint is early (6.7% of training), (b) KL already partially collapsed (posterior ≈ prior at these EMA weights), and (c) the posterior leak is most pronounced in the raw training weights, not the EMA. The wandb train metrics provide stronger evidence of the leak than the checkpoint probe.
+
+---
+
+### R7b — GRAM with pre-eps decode (structural leak fix)
+
+Date: 2026-06-06
+Config: `config/arch/urm_r7b_gram_predecode_h128.yaml`
+Baseline: R7a (leaked), R4d (d=1, h=128, exp=2, loops=8, dropout=0.1, 137K params, 21.25% eval exact).
+
+**Diagnosis of R7a leak:** The posterior encodes the target into eps_t, which is injected BEFORE the transformer pass at step t, and the SAME step's output is decoded by lm_head. This one-pass shortcut means deep supervision at step t directly rewards using posterior information in step t's prediction. The prior never learns because it never needs to: at train time, the posterior bypasses it entirely.
+
+**Fix: decode from pre-eps deterministic state.** Break the one-pass leak by ensuring eps_t can only influence FUTURE steps' predictions, never step t's own decoded output. Concretely:
+1. At step t, compute `pre_t = hidden + input_embeddings` (standard URM input re-injection)
+2. Run transformer pass on un-perturbed pre_t to get deterministic update `u_t`
+3. **Decode logits and q_logits from u_t** (the clean, pre-eps state)
+4. Sample eps_t (posterior at train, prior at eval) and form carry `h_t = u_t + eps_t` for the NEXT step
+5. At step N (final), don't inject eps (it would only feed a nonexistent step N+1)
+
+This means eps_t affects steps t+1..N's decoded outputs (after at least one deterministic transformer pass mixes it), but NOT step t's decoded output. The posterior can still guide the trajectory, but it must do so through a transformer pass that mixes eps with hidden state — the direct label→logits shortcut is broken.
+
+**Design trade-off acknowledged:** This introduces a per-step off-by-one: step t's decoded output reflects the perturbation from step t-1, not step t. We previously rejected this for consistency (R7a design decision: "inject at pass input so readout is consistent"). The posterior leak is why this consistency trade-off flipped — the "consistent" design enables a structural shortcut that destroys the prior path entirely.
+
+**Additional guard: `gram_detach_posterior_recon`** (config flag, default false). When true, detaches eps_t from the computation graph for reconstruction loss, so only KL loss shapes the posterior MLP. This prevents reconstruction loss gradients from training the posterior to encode the answer. Left false for R7b v1 — the structural fix should be sufficient, and keeping recon gradients lets the posterior learn useful perturbation directions.
+
+**Hypothesis:** Pre-eps decode closes the posterior leak. Predictions:
+1. `train/step_8_exact_accuracy` should climb gradually (like R4d baseline), NOT saturate to 1.0 in hundreds of steps
+2. `gram_kl` should stay positive throughout training (posterior has useful information to contribute, not just the answer)
+3. Eval pass@K should be nonzero (prior path is forced to learn useful perturbations)
+
+**Params:** Same ~195K as R7a (no architecture change, only decode ordering).
+
+Success criteria:
+1. No instant train saturation: `train/step_8_exact_accuracy` at step 1000 should be < 0.5 (R7a was 1.0)
+2. `gram_kl` stays > 0.1 through training (posterior is active, not collapsed)
+3. Eval exact accuracy > 0 by step 10K
+4. Single-trajectory eval exact ≥ 18% at 80K steps (within 3pp of R4d baseline)
+
+Metrics to watch: same as R7a, plus comparison of train saturation speed to R4d baseline.

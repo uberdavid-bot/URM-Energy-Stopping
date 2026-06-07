@@ -295,6 +295,16 @@ class EnergyLossHead(nn.Module):
                 bestq_seq_correct = bestq_correct.sum(-1) == loss_counts
                 metrics["gram_qhalt_bestof_exact"] = (valid & bestq_seq_correct).sum()
 
+            # Posterior eval probe: run one pass with posterior forced on to confirm leak
+            if self.model.config.gram_posterior_eval_probe:
+                post_logits, _, _, _, _ = self.model.forward_trajectory(
+                    batch, N, labels=labels, force_posterior=True
+                )
+                post_final_preds = torch.argmax(post_logits[-1], dim=-1)
+                post_correct = mask & (post_final_preds == labels)
+                post_seq_correct = post_correct.sum(-1) == loss_counts
+                metrics["gram_posterior_eval_exact"] = (valid & post_seq_correct).sum()
+
         # --- Return outputs ---
         returned_outputs: Dict[str, torch.Tensor] = {}
         if return_raw_outputs:

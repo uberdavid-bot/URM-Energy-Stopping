@@ -68,6 +68,12 @@ class ARCModelConfig(BaseModel):
     gram_logvar_max: float = 2.0
     gram_mlp_hidden: int = 64
     gram_num_samples: int = 8
+    # R7b: decode logits from pre-eps deterministic state (breaks one-pass posterior leak)
+    gram_predecode: bool = False
+    # R7b: stop recon-loss gradients from flowing into posterior MLP (KL-only posterior shaping)
+    gram_detach_posterior_recon: bool = False
+    # Diagnostic: run posterior-conditioned eval pass to confirm leak (temporary probe)
+    gram_posterior_eval_probe: bool = False
 
 
 class ARCBlock(nn.Module):
@@ -394,11 +400,14 @@ class ARCModel(nn.Module):
         return hidden
 
     def forward_trajectory(self, batch: Dict[str, torch.Tensor], N: Optional[int] = None,
-                           labels: Optional[torch.Tensor] = None):
+                           labels: Optional[torch.Tensor] = None,
+                           force_posterior: bool = False):
         """Run N recurrence steps with full gradient flow (no detach between steps).
 
         Returns per-step logits, per-step Q-halt logits, per-step hidden states,
         input_embeddings (for energy computation), and per-step KL list (GRAM only).
+
+        force_posterior: if True, use posterior (with labels) even at eval. For leak probe only.
         """
         N = N or self.config.loops
         input_embeddings = self.inner._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
@@ -412,9 +421,12 @@ class ARCModel(nn.Module):
             self.inner.config.seq_len + P + R, -1
         ).clone()
 
-        # GRAM: precompute label embeddings for posterior (training only)
+        # GRAM: precompute label embeddings for posterior
         gram_label_emb = None
-        if self.config.gram_enabled and self.training and labels is not None:
+        use_posterior = (self.config.gram_enabled and
+                         (self.training or force_posterior) and
+                         labels is not None)
+        if use_posterior:
             gram_label_emb = self._gram_label_embeddings(labels)
 
         all_logits = []
@@ -433,20 +445,49 @@ class ARCModel(nn.Module):
                 if self.config.gram_enabled:
                     mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pre_t))
 
-                    if self.training and gram_label_emb is not None:
+                    if use_posterior:
                         posterior_input = torch.cat([pre_t, gram_label_emb], dim=-1)
                         mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
                         eps_t = self._gram_reparam(mu_q, logvar_q)
+                        if self.config.gram_detach_posterior_recon:
+                            eps_t = eps_t.detach()
                         kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)
                         all_gram_kl.append(kl_t.mean())
                     else:
                         eps_t = self._gram_reparam(mu_p, logvar_p)
 
-                    pre_t = pre_t + eps_t
+                    if self.config.gram_predecode:
+                        # R7b: decode from deterministic state BEFORE eps injection.
+                        # Run transformer on un-perturbed pre_t, decode, THEN add eps to carry.
+                        det_hidden = pre_t
+                        for layer in self.inner.layers:
+                            det_hidden = layer(hidden_states=det_hidden, **seq_info)
 
-                hidden = pre_t
-                for layer in self.inner.layers:
-                    hidden = layer(hidden_states=hidden, **seq_info)
+                        logits = self.inner.lm_head(det_hidden)[:, P + R:]
+                        q_logits = self.inner.q_head(det_hidden[:, 0]).to(torch.float32).squeeze(-1)
+
+                        # Carry: perturbed state for next step (eps influences future steps only)
+                        if step < N - 1:
+                            hidden = det_hidden + eps_t
+                        else:
+                            hidden = det_hidden
+                    else:
+                        # R7a: original — eps injected before transformer, decoded from post-eps state
+                        pre_t = pre_t + eps_t
+
+                        hidden = pre_t
+                        for layer in self.inner.layers:
+                            hidden = layer(hidden_states=hidden, **seq_info)
+
+                        logits = self.inner.lm_head(hidden)[:, P + R:]
+                        q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32).squeeze(-1)
+                else:
+                    hidden = pre_t
+                    for layer in self.inner.layers:
+                        hidden = layer(hidden_states=hidden, **seq_info)
+
+                    logits = self.inner.lm_head(hidden)[:, P + R:]
+                    q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32).squeeze(-1)
 
                 # Recurrence noise: additive Gaussian on hidden state (training only)
                 if self.config.recurrence_noise > 0 and self.training:
@@ -457,10 +498,9 @@ class ARCModel(nn.Module):
                     hidden, input_embeddings, self.config.mcmc_step_size, full_hidden=True
                 )
 
-            # lm_head slice skips both puzzle_emb (P) and register (R) prefixes.
-            logits = self.inner.lm_head(hidden)[:, P + R:]
-            # Q-halt reads position 0 (puzzle_emb slot, unchanged by registers).
-            q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32).squeeze(-1)
+                logits = self.inner.lm_head(hidden)[:, P + R:]
+                q_logits = self.inner.q_head(hidden[:, 0]).to(torch.float32).squeeze(-1)
+
             all_logits.append(logits)
             all_q_logits.append(q_logits)
             all_hidden.append(hidden)

@@ -1285,3 +1285,57 @@ Config: `config/arch/urm_r6h_gqa_h128.yaml`
 Mechanism: 8 query heads sharing 2 KV heads (head_dim=16). Tests diverse Q patterns with shared factual KV retrieval. Uses flash_attn's native GQA support.
 Hypothesis: For recurrence, consistent factual retrieval (shared KV) with diverse interpretation (many Q heads) may be beneficial. Each recurrence step sees the same "facts" but extracts different aspects.
 Success criterion: Eval exact > 21.25%.
+
+---
+
+## R7 series — Stochastic latent transitions (GRAM)
+
+### R7a — GRAM stochastic guidance at h=128 (no energy)
+
+Date: 2026-06-06
+Config: `config/arch/urm_r7a_gram_h128.yaml`
+Baseline: R4d (d=1, h=128, exp=2, loops=8, dropout=0.1, 137K params, 21.25% eval exact).
+Reference: Generative Recursive Reasoning (arXiv:2605.19376, Gao et al., 2025).
+
+**Mechanism:** GRAM-style VAE perturbation injected at the input of every URM recurrence step. At each step t:
+1. Compute `pre_t = hidden + input_embeddings` (standard URM input re-injection)
+2. Prior MLP: `(mu_p, logvar_p) = prior_mlp(pre_t)` — H→64→2H, SiLU activation
+3. Posterior MLP (train only): `(mu_q, logvar_q) = posterior_mlp(concat(pre_t, label_emb))` — 2H→64→2H
+4. Reparameterize: `eps_t = mu + exp(0.5*logvar) * randn_like(mu)` (posterior at train, prior at eval)
+5. Perturb: `pre_t = pre_t + eps_t`
+6. Transformer pass on perturbed input; carry perturbed state forward
+
+**Design decisions:**
+- **Inject at pass input (pre_t)**: All steps are symmetric and the readout (lm_head on transformer output) is consistent — the transformer always processes the perturbation before it's decoded.
+- **Per-position eps with shared MLP weights**: The MLP weights are shared across positions but each position gets its own (mu, logvar) and eps because pre_t differs per position. No broadcasting — eps is [B, P+seq, H].
+- **Posterior conditions on label embedding**: Labels embedded via the existing embed_tokens (IGNORE_LABEL_ID replaced with pad=0), scaled by embed_scale, with P+R prefix slots zero-padded to match pre_t layout.
+- **Carry perturbed state forward**: `hidden = pre_t + eps_t` after perturbation, before transformer. The perturbation persists across steps and accumulates.
+- **KL over all N steps**: KL(q||p) closed-form Gaussian summed over positions, averaged over steps. Loss: `gram_beta * mean_over_steps(KL_t)`. No KL warmup, no free-bits, no balancing — collapse is a measured outcome.
+- **beta=0.1 flat**: Conservative first setting. If KL collapses to 0 (posterior = prior, eps → deterministic), the model degenerates to R4d. If KL stays high, the stochastic perturbation is active and contributes trajectory diversity.
+- **logvar clamped to [-5, 2]**: Prevents numerical issues; exp(0.5*2)=2.72 max std, exp(0.5*(-5))=0.08 min std.
+
+**Multi-trajectory inference (eval only):** M=8 independent prior-sampled trajectories per batch. Two selection strategies:
+- Majority vote: per-position modal token across M grids.
+- Q-halt best-of-N: pick trajectory with highest sigmoid(q_logit).
+
+**Hypothesis:** Stochastic latent transitions improve ARC over deterministic URM at h=128. Two mechanisms:
+1. **Training regularization**: The posterior-prior KL and stochastic perturbation act as a structured regularizer on hidden states, potentially improving generalization (analogous to VAE regularization on latent spaces).
+2. **Width scaling via M trajectories + selection**: At eval, M independent prior-sampled trajectories provide diverse candidate solutions. Majority vote or Q-halt best-of-N selection over M trajectories should beat single-trajectory exact accuracy without increasing model params.
+
+**Params:** ~58K GRAM params (prior_mlp: H→64→2H = 128×64+64+64×256+256 ≈ 25K; posterior_mlp: 2H→64→2H ≈ 25K; total ~50K). Combined with R4d baseline: ~195K total.
+
+Success criteria:
+1. gram_sigma_mean stays above 0.01 throughout training (no eps→0 collapse)
+2. gram_majority_exact > R4d single-trajectory exact (21.25%)
+3. gram_qhalt_bestof_exact > R4d single-trajectory exact
+4. Single-trajectory eval exact ≥ 20% (GRAM doesn't destroy backbone by >1.25pp)
+
+Metrics to watch:
+- `gram_kl`: mean per-step KL. Should be positive and stable, not collapsing to 0.
+- `gram_sigma_mean`: mean exp(0.5*logvar_p) under the prior. If → 0, the prior learned to suppress perturbation.
+- `gram_majority_exact`: majority-vote exact accuracy over M trajectories.
+- `gram_qhalt_bestof_exact`: best-of-N (by Q-halt) exact accuracy over M trajectories.
+- Standard per-step accuracy curve, pass@K (existing evaluator).
+
+### Result
+TBD

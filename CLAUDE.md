@@ -95,11 +95,12 @@ The codebase has been streamlined to only the active experiment pipeline:
 - **Deleted losses**: `models/dsm_loss.py`, `ACTLossHead` — DSM was unnecessary; contrastive-only caused energy collapse; ACTLossHead was the old carry-based loss head. Note: `models/trajectory_loss.py` was re-created for R2 (trajectory ranking loss for energy head co-training).
 - **Deleted carry infrastructure**: `ModelCarry` dataclass, `ARCBackbone.forward()`, `ARCBackbone.empty_carry()`, `ARCBackbone.reset_carry()`, `ARCModel.forward()`, `ARCModel.initial_carry()`, per-sample halting logic. Replaced by `forward_trajectory()`.
 - **MLP rounding fix**: `_find_multiple` granularity changed from 256 to 8 in `models/layers.py` to allow smooth capacity scaling at small model sizes (at h=64/exp=2, inter=88 instead of 256).
-- **Active configs** (current: R4/R5 width series):
+- **Active configs** (current: R4/R5 width series, R7 GRAM):
   - Baselines + energy: `urm_r1_h96_baseline.yaml`, `urm_r2c_h96_pos_mlp.yaml`, `urm_r2g_h96_ranking_noise.yaml`, `urm_r2i_h96_cross_traj.yaml`, `urm_r3_hybrid_h96.yaml`, `urm_r3b_hybrid_h96.yaml`
   - Backbone probes at h=96: `urm_r4a_registers_h96.yaml`, `urm_r4b_xsa_h96.yaml`, `urm_r4c_loops16_h96.yaml`
   - Width sweep (best-performing axis): `urm_r4d_h128.yaml`, `urm_r4e_h160.yaml`, `urm_r4f_h128_regularized.yaml`, `urm_r5a_h192.yaml`, `urm_r5b_h128_loops16.yaml`, `urm_r5c_h160_long.yaml`
   - Attention architecture sweep at h=128: `urm_r6a_sink_h128.yaml`, `urm_r6b_temperature_h128.yaml`, `urm_r6c_registers_h128.yaml`, `urm_r6d_heads8_h128.yaml`, `urm_r6e_heads16_h128.yaml`, `urm_r6f_heads2_h128.yaml`, `urm_r6g_partial_rope_h128.yaml`, `urm_r6h_gqa_h128.yaml`
+  - GRAM stochastic latent transitions: `urm_r7a_gram_h128.yaml`
   - Legacy h=64: `urm_r1i_dropout.yaml`, `urm_r2_trajectory.yaml`, `urm_r2b_trajectory_dropout.yaml`, `urm_r2c_pos_mlp.yaml`, `ablation_a1/a2/a3/a4` variants
   - Legacy base: `urm_qhalt.yaml`, `ebt_energy.yaml`
 - **Active scripts**: `scripts/train_r4_backbone_experiments.sh` (R4b + R4c), `scripts/train_r4d_width_sweep.sh` (R4d/e/f), `scripts/train_r5_scale_sweep.sh` (R5a/b/c), `scripts/train_r6_attention_sweep.sh` (R6a-h), `scripts/analyze_failure_modes.py` (failure bucketing diagnostic), `scripts/eval_qhalt_mcmc.py` (R3-diag), `scripts/eval_energy_ranking.py` (energy ranking comparison), plus legacy per-experiment scripts.
@@ -133,6 +134,14 @@ Four loss config fields control energy head co-training (R2+/R2g/R2i):
 - **`ranking_margin`**: float (default 0.1). Margin for pair ranking loss.
 - **`ranking_noise_sigma`**: float (default 0.0). R2g: σ sampled per step ~ Uniform(0, ranking_noise_sigma), applied to hidden states before the energy head scores them. Reconstruction path uses clean hidden states. Training only. Breaks the step-index shortcut (R2g-h96: eval Spearman +0.007 → −0.227).
 - **`cross_trajectory`**: bool (default False). R2i: replace within-trajectory ranking with [B, B] same-step all-pairs ranking across augmentations within a batch. When True, the within-trajectory loop in `trajectory_ranking_loss` is skipped entirely; `total_loss = recon + 0.5*qhalt + elw * cross_traj`. Documented negative at h=96 due to train (same-puzzle augs) ≠ eval (heterogeneous puzzles) distribution mismatch.
+
+Six model config fields control GRAM stochastic latent transitions (R7):
+- **`gram_enabled`**: bool (default false). Enables GRAM prior/posterior VAE perturbation at every URM step. When false, `forward_trajectory` is unchanged.
+- **`gram_beta`**: float (default 0.1). KL loss weight: `total_loss += gram_beta * mean_over_steps(KL_t)`.
+- **`gram_logvar_min`**: float (default -5.0). Clamp floor for logvar output of prior/posterior MLPs.
+- **`gram_logvar_max`**: float (default 2.0). Clamp ceiling for logvar.
+- **`gram_mlp_hidden`**: int (default 64). Hidden width of prior/posterior MLPs (H→mlp_hidden→2H).
+- **`gram_num_samples`**: int (default 8). Number of independent prior-sampled trajectories at eval for majority-vote and Q-halt best-of-N metrics.
 
 Two pretrain config fields control gradient clipping:
 - **`grad_clip_backbone`**: float (default 5.0). Max gradient norm for backbone parameters.

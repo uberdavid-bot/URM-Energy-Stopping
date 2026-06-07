@@ -237,7 +237,7 @@ def main():
         # We need hidden_at_M for M in M_VALUES (for MCMC) AND logits at every
         # `pure_urm_steps` index (for the URM baselines).
         with torch.no_grad():
-            all_logits, all_q_logits, all_hidden, input_embeddings = arc_model.forward_trajectory(
+            all_logits, all_q_logits, all_hidden, input_embeddings, _ = arc_model.forward_trajectory(
                 batch, N=max_step
             )
 

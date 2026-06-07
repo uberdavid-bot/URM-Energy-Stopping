@@ -1,0 +1,38 @@
+# R7a — GRAM stochastic latent transitions at h=128
+# Baseline: R4d (h=128, loops=8, refinement=urm, dropout=0.1).
+# Adds GRAM prior/posterior VAE-style perturbation at every recurrence step.
+# No energy head training — energy_loss_weight=0.
+name: urm.urm_energy@ARCModel
+loss:
+  name: losses@EnergyLossHead
+  loss_type: stablemax_cross_entropy
+  energy_loss_weight: 0.0
+  ranking_margin: 0.1
+
+loops: 8
+num_layers: 1
+hidden_size: 128
+num_heads: 4
+expansion: 2
+
+attn_dropout: 0.1
+mlp_dropout: 0.1
+recurrence_noise: 0.0
+
+puzzle_emb_ndim: ${.hidden_size}
+pos_encodings: rope
+
+energy_threshold: 0.005
+min_steps: 8
+
+refinement: urm
+stopping: qhalt
+ranking: qhalt
+
+gram_enabled: true
+gram_beta: 0.1
+gram_mlp_hidden: 64
+gram_num_samples: 8
+
+ema: True
+ema_rate: 0.999

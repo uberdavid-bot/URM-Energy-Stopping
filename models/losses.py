@@ -65,10 +65,12 @@ class EnergyLossHead(nn.Module):
         returned_outputs, True) — carry placeholder is None, all_finished is always True.
         """
         N = self.model.config.loops
-        all_logits, all_q_logits, all_hidden, input_embeddings = self.model.forward_trajectory(batch, N)
+        labels = batch["labels"]
+        all_logits, all_q_logits, all_hidden, input_embeddings, gram_kl = self.model.forward_trajectory(
+            batch, N, labels=labels if self.training else None
+        )
         P = self.model.inner.puzzle_emb_len
 
-        labels = batch["labels"]
         mask = labels != IGNORE_LABEL_ID
         loss_counts = mask.sum(-1)
         loss_divisor = loss_counts.clamp_min(1).unsqueeze(-1)
@@ -114,6 +116,12 @@ class EnergyLossHead(nn.Module):
                 training=self.training,
             )
             total_loss = total_loss + self.energy_loss_weight * ranking_loss
+
+        # R7a: GRAM KL loss
+        gram_kl_mean = None
+        if gram_kl is not None and len(gram_kl) > 0:
+            gram_kl_mean = torch.stack(gram_kl).mean()
+            total_loss = total_loss + self.model.config.gram_beta * gram_kl_mean
 
         # --- Metrics (no_grad) ---
         with torch.no_grad():
@@ -253,6 +261,39 @@ class EnergyLossHead(nn.Module):
             if ranking_metrics is not None:
                 for k, v in ranking_metrics.items():
                     metrics[k] = v * metrics["count"]
+
+            # R7a: GRAM metrics
+            if gram_kl_mean is not None:
+                metrics["gram_kl"] = gram_kl_mean.detach() * metrics["count"]
+            if self.model.config.gram_enabled:
+                with torch.no_grad():
+                    # Prior sigma mean: monitor for eps->0 collapse
+                    sample_pre = all_hidden[0] + input_embeddings  # representative pre_t
+                    prior_out = self.model.gram_prior_mlp(sample_pre)
+                    _, logvar_p = self.model._gram_split(prior_out)
+                    sigma_mean = torch.exp(0.5 * logvar_p).mean()
+                    metrics["gram_sigma_mean"] = sigma_mean * metrics["count"]
+
+            # R7a: GRAM multi-trajectory eval metrics
+            if self.model.config.gram_enabled and not self.training:
+                M = self.model.config.gram_num_samples
+                all_traj_preds, all_traj_q = self.model.forward_gram_samples(batch, M)
+                # all_traj_preds: [M, B, seq_len], all_traj_q: [M, B]
+
+                # Majority vote: per-position modal token across M trajectories
+                mode_preds, _ = torch.mode(all_traj_preds, dim=0)  # [B, seq_len]
+                maj_correct = mask & (mode_preds == labels)
+                maj_seq_correct = maj_correct.sum(-1) == loss_counts
+                metrics["gram_majority_exact"] = (valid & maj_seq_correct).sum()
+
+                # Q-halt best-of-N: pick trajectory with highest sigmoid(q_logit)
+                best_traj_idx = all_traj_q.argmax(dim=0)  # [B]
+                best_preds = all_traj_preds.gather(
+                    0, best_traj_idx.unsqueeze(0).unsqueeze(-1).expand(1, B, all_traj_preds.shape[2])
+                ).squeeze(0)  # [B, seq_len]
+                bestq_correct = mask & (best_preds == labels)
+                bestq_seq_correct = bestq_correct.sum(-1) == loss_counts
+                metrics["gram_qhalt_bestof_exact"] = (valid & bestq_seq_correct).sum()
 
         # --- Return outputs ---
         returned_outputs: Dict[str, torch.Tensor] = {}

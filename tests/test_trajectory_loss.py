@@ -51,7 +51,7 @@ class TestTrajectoryRankingLoss:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        all_logits, all_q_logits, all_hidden, input_emb = model.forward_trajectory(batch)
+        all_logits, all_q_logits, all_hidden, input_emb, _ = model.forward_trajectory(batch)
 
         loss, metrics = trajectory_ranking_loss(
             model, all_hidden, all_logits, batch["labels"], input_emb
@@ -71,7 +71,7 @@ class TestTrajectoryRankingLoss:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        all_logits, _, all_hidden, input_emb = model.forward_trajectory(batch)
+        all_logits, _, all_hidden, input_emb, _ = model.forward_trajectory(batch)
 
         _, metrics = trajectory_ranking_loss(
             model, all_hidden, all_logits, batch["labels"], input_emb
@@ -85,7 +85,7 @@ class TestTrajectoryRankingLoss:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        all_logits, _, all_hidden, input_emb = model.forward_trajectory(batch)
+        all_logits, _, all_hidden, input_emb, _ = model.forward_trajectory(batch)
 
         loss, _ = trajectory_ranking_loss(
             model, all_hidden, all_logits, batch["labels"], input_emb
@@ -102,7 +102,7 @@ class TestTrajectoryRankingLoss:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        all_logits, _, all_hidden, input_emb = model.forward_trajectory(batch)
+        all_logits, _, all_hidden, input_emb, _ = model.forward_trajectory(batch)
 
         loss, _ = trajectory_ranking_loss(
             model, all_hidden, all_logits, batch["labels"], input_emb
@@ -120,7 +120,7 @@ class TestTrajectoryRankingLoss:
         model = ARCModel(config).to(DEVICE).train()
         batch = make_batch(config)
 
-        all_logits, _, all_hidden, input_emb = model.forward_trajectory(batch)
+        all_logits, _, all_hidden, input_emb, _ = model.forward_trajectory(batch)
 
         _, metrics = trajectory_ranking_loss(
             model, all_hidden, all_logits, batch["labels"], input_emb

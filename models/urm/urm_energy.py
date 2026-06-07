@@ -61,6 +61,13 @@ class ARCModelConfig(BaseModel):
     # Energy head architecture: "linear" | "position_mlp" | "position_conv_mlp" | "position_attn_mlp"
     energy_head_type: str = "linear"
     energy_head_hidden: int = 32
+    # R7a GRAM: stochastic latent transitions (prior/posterior VAE-style perturbation per recurrence step)
+    gram_enabled: bool = False
+    gram_beta: float = 0.1
+    gram_logvar_min: float = -5.0
+    gram_logvar_max: float = 2.0
+    gram_mlp_hidden: int = 64
+    gram_num_samples: int = 8
 
 
 class ARCBlock(nn.Module):
@@ -274,9 +281,56 @@ class ARCModel(nn.Module):
                 dtype=self.inner.forward_dtype,
             )
 
+        if self.config.gram_enabled:
+            H = self.config.hidden_size
+            gh = self.config.gram_mlp_hidden
+            dt = self.inner.forward_dtype
+            self.gram_prior_mlp = nn.Sequential(
+                nn.Linear(H, gh, dtype=dt),
+                nn.SiLU(),
+                nn.Linear(gh, 2 * H, dtype=dt),
+            )
+            self.gram_posterior_mlp = nn.Sequential(
+                nn.Linear(2 * H, gh, dtype=dt),
+                nn.SiLU(),
+                nn.Linear(gh, 2 * H, dtype=dt),
+            )
+
     @property
     def puzzle_emb(self):
         return self.inner.puzzle_emb
+
+    def _gram_reparam(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        logvar = logvar.clamp(self.config.gram_logvar_min, self.config.gram_logvar_max)
+        std = torch.exp(0.5 * logvar)
+        return mu + std * torch.randn_like(mu)
+
+    def _gram_split(self, out: torch.Tensor):
+        H = self.config.hidden_size
+        mu, logvar = out[..., :H], out[..., H:]
+        logvar = logvar.clamp(self.config.gram_logvar_min, self.config.gram_logvar_max)
+        return mu, logvar
+
+    def _gram_kl(self, mu_q: torch.Tensor, logvar_q: torch.Tensor,
+                 mu_p: torch.Tensor, logvar_p: torch.Tensor) -> torch.Tensor:
+        """Closed-form KL(q || p) for diagonal Gaussians, summed over last dim."""
+        return 0.5 * (
+            logvar_p - logvar_q
+            + (logvar_q.exp() + (mu_q - mu_p).pow(2)) / logvar_p.exp().clamp(min=1e-8)
+            - 1.0
+        ).sum(dim=-1)
+
+    def _gram_label_embeddings(self, labels: torch.Tensor) -> torch.Tensor:
+        """Embed labels for posterior conditioning. Returns [B, P+seq, H]."""
+        safe_labels = labels.clone()
+        safe_labels[safe_labels == -100] = 0
+        label_emb = self.inner.embed_scale * self.inner.embed_tokens(safe_labels.to(torch.int32))
+        B = labels.shape[0]
+        P = self.inner.puzzle_emb_len
+        R = self.config.num_registers
+        pad = torch.zeros(B, P + R, self.config.hidden_size,
+                          device=labels.device, dtype=label_emb.dtype)
+        return torch.cat([pad, label_emb], dim=1)
 
     def compute_joint_energy(self, input_embeddings: torch.Tensor, output_embeddings: torch.Tensor) -> torch.Tensor:
         """
@@ -339,11 +393,12 @@ class ARCModel(nn.Module):
 
         return hidden
 
-    def forward_trajectory(self, batch: Dict[str, torch.Tensor], N: Optional[int] = None):
+    def forward_trajectory(self, batch: Dict[str, torch.Tensor], N: Optional[int] = None,
+                           labels: Optional[torch.Tensor] = None):
         """Run N recurrence steps with full gradient flow (no detach between steps).
 
         Returns per-step logits, per-step Q-halt logits, per-step hidden states,
-        and input_embeddings (for energy computation).
+        input_embeddings (for energy computation), and per-step KL list (GRAM only).
         """
         N = N or self.config.loops
         input_embeddings = self.inner._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
@@ -357,16 +412,39 @@ class ARCModel(nn.Module):
             self.inner.config.seq_len + P + R, -1
         ).clone()
 
+        # GRAM: precompute label embeddings for posterior (training only)
+        gram_label_emb = None
+        if self.config.gram_enabled and self.training and labels is not None:
+            gram_label_emb = self._gram_label_embeddings(labels)
+
         all_logits = []
         all_q_logits = []
         all_hidden = []
+        all_gram_kl = []
 
         for step in range(N):
             if self.config.refinement == "urm" or (
                 self.config.refinement == "hybrid" and step < self.config.mcmc_start_step
             ):
                 # URM update: input re-injection + transformer pass
-                hidden = hidden + input_embeddings
+                pre_t = hidden + input_embeddings
+
+                # GRAM: stochastic latent perturbation
+                if self.config.gram_enabled:
+                    mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pre_t))
+
+                    if self.training and gram_label_emb is not None:
+                        posterior_input = torch.cat([pre_t, gram_label_emb], dim=-1)
+                        mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
+                        eps_t = self._gram_reparam(mu_q, logvar_q)
+                        kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)
+                        all_gram_kl.append(kl_t.mean())
+                    else:
+                        eps_t = self._gram_reparam(mu_p, logvar_p)
+
+                    pre_t = pre_t + eps_t
+
+                hidden = pre_t
                 for layer in self.inner.layers:
                     hidden = layer(hidden_states=hidden, **seq_info)
 
@@ -387,4 +465,22 @@ class ARCModel(nn.Module):
             all_q_logits.append(q_logits)
             all_hidden.append(hidden)
 
-        return all_logits, all_q_logits, all_hidden, input_embeddings
+        gram_kl = all_gram_kl if all_gram_kl else None
+        return all_logits, all_q_logits, all_hidden, input_embeddings, gram_kl
+
+    def forward_gram_samples(self, batch: Dict[str, torch.Tensor], M: int):
+        """Run M independent prior-sampled trajectories (eval only).
+
+        Returns:
+            all_preds: [M, B, seq_len] — argmax grid predictions per trajectory
+            all_q_logits: [M, B] — final-step Q-halt logits per trajectory
+        """
+        all_preds = []
+        all_q_logits = []
+        for _ in range(M):
+            logits_list, q_list, _, _, _ = self.forward_trajectory(batch)
+            final_preds = torch.argmax(logits_list[-1], dim=-1)
+            final_q = q_list[-1]
+            all_preds.append(final_preds)
+            all_q_logits.append(final_q)
+        return torch.stack(all_preds, dim=0), torch.stack(all_q_logits, dim=0)

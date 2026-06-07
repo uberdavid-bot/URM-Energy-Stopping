@@ -53,7 +53,7 @@ def _run_smoke(config_overrides, N=2):
 
     model.train()
     batch = make_batch(config)
-    all_logits, all_q_logits, all_hidden, input_emb = model.forward_trajectory(batch, N=N)
+    all_logits, all_q_logits, all_hidden, input_emb, _ = model.forward_trajectory(batch, N=N)
 
     B = config["batch_size"]
     S = config["seq_len"]

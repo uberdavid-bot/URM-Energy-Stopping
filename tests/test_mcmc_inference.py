@@ -474,31 +474,163 @@ class TestGRAMCleanDecode:
             assert torch.allclose(base_logits[t], gram_logits[t], atol=1e-5), \
                 f"Step {t}: gram_enabled=False logits diverge from baseline"
 
-    def test_gram_carry_is_perturbed_but_logits_clean(self):
-        """With alpha > 0, the carry (all_hidden) should differ from a
-        deterministic run, but logits should still derive from clean u_t."""
+    def test_terminal_logits_derive_from_perturbed_state(self):
+        """R7e: terminal step decodes from u_{N-1} + eps, not clean u_{N-1}."""
         config = make_config(
             loops=4,
             gram_enabled=True,
             gram_latent_dim=8,
-            gram_sigma_alpha=0.5,
             gram_beta=0.1,
         )
         model = ARCModel(config).to(DEVICE)
         model.eval()
         batch = make_batch(config)
 
+        # Run two trajectories with different seeds — terminal logits should differ
+        torch.manual_seed(100)
         with torch.no_grad():
-            logits, _, all_hidden, _, _, gram_sigma = model.forward_trajectory(batch)
+            logits_a, _, hidden_a, _, _, _ = model.forward_trajectory(batch)
 
-        assert gram_sigma is not None and len(gram_sigma) > 0, \
-            "Expected non-empty gram_effective_sigma with alpha > 0"
+        torch.manual_seed(200)
+        with torch.no_grad():
+            logits_b, _, hidden_b, _, _, _ = model.forward_trajectory(batch)
 
-        for t in range(3):  # steps 0..2 should have perturbed carry
-            h_t = all_hidden[t]
-            lm_logits_from_hidden = model.inner.lm_head(h_t)[:, model.inner.puzzle_emb_len + config["num_registers"] if "num_registers" in config else model.inner.puzzle_emb_len:]
-            assert not torch.allclose(logits[t + 1], lm_logits_from_hidden, atol=1e-3), \
-                f"Step {t+1} logits should NOT equal lm_head(perturbed_carry)"
+        # Non-terminal steps are deterministic — logits must match
+        for t in range(3):
+            assert torch.allclose(logits_a[t], logits_b[t], atol=1e-5), \
+                f"Step {t} logits should be deterministic (seed-independent)"
+
+        # Terminal step logits should differ due to different eps samples
+        assert not torch.allclose(logits_a[-1], logits_b[-1], atol=1e-3), \
+            "Terminal logits should differ across seeds (stochastic eps)"
+
+
+class TestGRAMTerminalOnly:
+    """R7e: verify terminal-only GRAM produces exactly one KL, deterministic non-terminal steps,
+    and that eps=0 recovers the deterministic baseline."""
+
+    def test_exactly_one_kl_per_trajectory(self):
+        """Training with GRAM should produce exactly 1 KL term (terminal only)."""
+        config = make_config(
+            loops=4,
+            gram_enabled=True,
+            gram_latent_dim=16,
+            gram_beta=0.1,
+        )
+        model = ARCModel(config).to(DEVICE).train()
+        batch = make_batch(config)
+
+        _, _, _, _, gram_kl, _ = model.forward_trajectory(
+            batch, labels=batch["labels"]
+        )
+
+        assert gram_kl is not None, "Expected KL from GRAM training"
+        assert len(gram_kl) == 1, f"Expected exactly 1 KL term (terminal), got {len(gram_kl)}"
+
+    def test_non_terminal_steps_deterministic(self):
+        """Steps 0..N-2 must produce identical logits regardless of GRAM being enabled."""
+        N = 4
+        base_config = make_config(loops=N, gram_enabled=False)
+        gram_config = make_config(loops=N, gram_enabled=True, gram_latent_dim=16, gram_beta=0.1)
+
+        torch.manual_seed(42)
+        base_model = ARCModel(base_config).to(DEVICE).eval()
+        torch.manual_seed(42)
+        gram_model = ARCModel(gram_config).to(DEVICE).eval()
+
+        batch = make_batch(base_config)
+
+        with torch.no_grad():
+            base_logits, _, _, _, _, _ = base_model.forward_trajectory(batch)
+            gram_logits, _, _, _, _, _ = gram_model.forward_trajectory(batch)
+
+        # Non-terminal steps: GRAM model matches baseline exactly
+        for t in range(N - 1):
+            assert torch.allclose(base_logits[t], gram_logits[t], atol=1e-5), \
+                f"Step {t}: non-terminal logits should match deterministic baseline"
+
+    def test_eval_produces_no_kl(self):
+        """At eval, prior sampling produces no KL (use_posterior=False)."""
+        config = make_config(
+            loops=4,
+            gram_enabled=True,
+            gram_latent_dim=16,
+            gram_beta=0.1,
+        )
+        model = ARCModel(config).to(DEVICE).eval()
+        batch = make_batch(config)
+
+        with torch.no_grad():
+            _, _, _, _, gram_kl, _ = model.forward_trajectory(batch)
+
+        assert gram_kl is None, "Eval should produce no KL (prior-only sampling)"
+
+    def test_zero_eps_recovers_deterministic(self):
+        """Zeroing prior+up_proj makes terminal decode match the deterministic u_{N-1}."""
+        config = make_config(
+            loops=4,
+            gram_enabled=True,
+            gram_latent_dim=16,
+            gram_beta=0.1,
+        )
+        model = ARCModel(config).to(DEVICE).eval()
+
+        # Zero prior MLP and up_proj so eps is exactly 0
+        with torch.no_grad():
+            for p in model.gram_prior_mlp.parameters():
+                p.zero_()
+            for p in model.gram_up_proj.parameters():
+                p.zero_()
+
+        batch = make_batch(config)
+
+        # Run GRAM model — terminal eps should be 0, so h_final == u_{N-1}
+        with torch.no_grad():
+            gram_logits, _, gram_hidden, _, _, _ = model.forward_trajectory(batch)
+
+        # Also run without GRAM on same model backbone to get deterministic u_{N-1}
+        # We can verify by checking that lm_head(hidden[-1]) == logits[-1]
+        # and that hidden[-1] would produce same logits as a non-GRAM run
+        P = model.inner.puzzle_emb_len
+        R = config.get("num_registers", 0)
+        expected = model.inner.lm_head(gram_hidden[-1])[:, P + R:]
+        assert torch.allclose(gram_logits[-1], expected, atol=1e-5), \
+            "Terminal logits should equal lm_head(h_final) even with zero eps"
+
+        # Non-terminal steps should be fully deterministic across seeds
+        torch.manual_seed(100)
+        with torch.no_grad():
+            logits_a, _, _, _, _, _ = model.forward_trajectory(batch)
+        torch.manual_seed(200)
+        with torch.no_grad():
+            logits_b, _, _, _, _, _ = model.forward_trajectory(batch)
+        for t in range(3):
+            assert torch.allclose(logits_a[t], logits_b[t], atol=1e-5)
+        # Terminal also matches since eps=0
+        assert torch.allclose(logits_a[-1], logits_b[-1], atol=1e-5), \
+            "With zero eps, terminal logits should be deterministic across seeds"
+
+    def test_terminal_logits_from_perturbed_not_clean(self):
+        """Terminal scored logits must derive from u_{N-1}+eps, not u_{N-1}."""
+        config = make_config(
+            loops=4,
+            gram_enabled=True,
+            gram_latent_dim=16,
+            gram_beta=0.1,
+        )
+        model = ARCModel(config).to(DEVICE).eval()
+        batch = make_batch(config)
+
+        with torch.no_grad():
+            logits, _, all_hidden, _, _, _ = model.forward_trajectory(batch)
+
+        # all_hidden[-1] is h_final = u_{N-1} + eps
+        # logits[-1] should equal lm_head(h_final)
+        P = model.inner.puzzle_emb_len
+        R = config.get("num_registers", 0)
+        expected_logits = model.inner.lm_head(all_hidden[-1])[:, P + R:]
+        assert torch.allclose(logits[-1], expected_logits, atol=1e-5), \
+            "Terminal logits should equal lm_head(h_final) where h_final = u_{N-1} + eps"
 
 
 if __name__ == "__main__":

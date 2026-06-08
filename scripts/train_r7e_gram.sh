@@ -1,13 +1,15 @@
 #!/bin/bash
-# R7e — GRAM-faithful clean decode, full 80K training run.
+# R7e — Terminal-only GRAM, full 80K training run.
 #
-# Fixes R7d structural bugs: (1) decode always from clean u_t (never perturbed),
-# (2) σ calibrated at injection point (u_t − hidden, not pre_t − hidden).
-# Perturbation only affects carry to next step.
+# Per-step trajectory noise (R7a-d) disrupted convergence at every scale tested.
+# R7e applies learned stochasticity ONLY at the terminal converged state:
+# steps 0..N-2 fully deterministic, step N-1 samples eps from prior/posterior
+# and decodes from u_{N-1} + eps. Single terminal KL, learned sigma.
+# k=16 low-rank bottleneck, no delta-norm rescaling.
 #
 # Baseline: R4d h=128 (21.25% eval exact, 44.81% pass@1000).
-# R7d negative: 11.83% eval exact (−9.42pp), delta norms 5-7× larger.
-# Key question: does clean decode recover accuracy lost to R7d's decode corruption?
+# Key question: can terminal-only perturbation preserve R4d accuracy
+# while creating a learned exploration distribution for parallel-decode?
 #
 # Runtime (3090): ~2h (h=128, loops=8). GRAM adds ~10% overhead for VAE ops.
 
@@ -39,11 +41,11 @@ COMMON_ARGS="data_path=data/arc1concept-aug-1000-size-10 \
   grad_clip_backbone=5.0 \
   +ema=True"
 
-run_name="R7e-gram-cleandecode-a02-h128-$(date +%y%m%d)"
+run_name="R7e-gram-terminal-h128-$(date +%y%m%d)"
 checkpoint_path="checkpoints/${run_name}"
 mkdir -p "$checkpoint_path"
 
-echo "=== R7e: GRAM clean decode, alpha=0.2, h=128 ==="
+echo "=== R7e: GRAM terminal-only, learned sigma, h=128 ==="
 DISABLE_COMPILE=1 $CONDA_RUN torchrun --nproc-per-node 1 pretrain.py \
   arch=urm_r7e_gram_cleandecode_h128 \
   weight_decay=0.1 \

@@ -430,6 +430,11 @@ class ARCModel(nn.Module):
                            force_posterior: bool = False):
         """Run N recurrence steps with full gradient flow (no detach between steps).
 
+        R7e: GRAM stochasticity is terminal-only. Steps 0..N-2 are fully
+        deterministic. At step N-1, eps is sampled (posterior during training,
+        prior at eval) and the terminal prediction decodes from u_{N-1} + eps.
+        A single KL(posterior || prior) is computed at the terminal step.
+
         Returns per-step logits, per-step Q-halt logits, per-step hidden states,
         input_embeddings (for energy computation), and per-step KL list (GRAM only).
 
@@ -447,7 +452,7 @@ class ARCModel(nn.Module):
             self.inner.config.seq_len + P + R, -1
         ).clone()
 
-        # GRAM: precompute label embeddings for posterior
+        # GRAM: precompute label embeddings for posterior (terminal step only)
         gram_label_emb = None
         use_posterior = (self.config.gram_enabled and
                          (self.training or force_posterior) and
@@ -459,9 +464,11 @@ class ARCModel(nn.Module):
         all_q_logits = []
         all_hidden = []
         all_gram_kl = []
-        all_gram_effective_sigma = []  # R7d: per-step effective injection scale
+        all_gram_effective_sigma = []
 
         for step in range(N):
+            is_terminal = (step == N - 1)
+
             if self.config.refinement == "urm" or (
                 self.config.refinement == "hybrid" and step < self.config.mcmc_start_step
             ):
@@ -473,59 +480,37 @@ class ARCModel(nn.Module):
                 for layer in self.inner.layers:
                     u_t = layer(hidden_states=u_t, **seq_info)
 
-                # Decode from clean u_t (never from perturbed state)
-                logits = self.inner.lm_head(u_t)[:, P + R:]
-                q_logits = self.inner.q_head(u_t[:, 0]).to(torch.float32).squeeze(-1)
-
-                # GRAM: stochastic perturbation applied to carry only
-                if self.config.gram_enabled:
+                # R7e terminal GRAM: sample eps and decode from perturbed state
+                if self.config.gram_enabled and is_terminal:
                     k = self.config.gram_latent_dim
-                    if k > 0:
-                        # R7c: per-example bottleneck — condition on u_t (post-transformer)
-                        pooled = u_t.mean(dim=1)  # [B, H]
-                        mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pooled))
+                    assert k > 0, "R7e requires gram_latent_dim > 0 (per-position k=0 leaked in R7a/R7b)"
 
-                        if use_posterior:
-                            pooled_label = gram_label_emb.mean(dim=1)  # [B, H]
-                            posterior_input = torch.cat([pooled, pooled_label], dim=-1)
-                            mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
-                            z = self._gram_reparam(mu_q, logvar_q)
-                            if self.config.gram_detach_posterior_recon:
-                                z = z.detach()
-                            kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)
-                            all_gram_kl.append(kl_t.mean())
-                        else:
-                            z = self._gram_reparam(mu_p, logvar_p)
+                    pooled = u_t.mean(dim=1)  # [B, H]
+                    mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pooled))
 
-                        eps_t = self.gram_up_proj(z).unsqueeze(1).expand_as(u_t)
+                    if use_posterior:
+                        pooled_label = gram_label_emb.mean(dim=1)  # [B, H]
+                        posterior_input = torch.cat([pooled, pooled_label], dim=-1)
+                        mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
+                        z = self._gram_reparam(mu_q, logvar_q)
+                        if self.config.gram_detach_posterior_recon:
+                            z = z.detach()
+                        kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)
+                        all_gram_kl.append(kl_t.mean())
                     else:
-                        # Per-position full-H eps — condition on u_t
-                        mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(u_t))
+                        z = self._gram_reparam(mu_p, logvar_p)
 
-                        if use_posterior:
-                            posterior_input = torch.cat([u_t, gram_label_emb], dim=-1)
-                            mu_q, logvar_q = self._gram_split(self.gram_posterior_mlp(posterior_input))
-                            eps_t = self._gram_reparam(mu_q, logvar_q)
-                            if self.config.gram_detach_posterior_recon:
-                                eps_t = eps_t.detach()
-                            kl_t = self._gram_kl(mu_q, logvar_q, mu_p, logvar_p)
-                            all_gram_kl.append(kl_t.mean())
-                        else:
-                            eps_t = self._gram_reparam(mu_p, logvar_p)
+                    eps_t = self.gram_up_proj(z).unsqueeze(1).expand_as(u_t)
+                    h_final = u_t + eps_t
 
-                    # Rescale eps: σ = α · ‖u_t − hidden‖ (delta-norm-proportional)
-                    if self.config.gram_sigma_alpha > 0:
-                        delta_norm_t = (u_t - hidden).norm(dim=-1).mean(dim=-1)  # [B]
-                        eps_flat = eps_t.reshape(eps_t.shape[0], -1)
-                        eps_norm = eps_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-                        eps_unit = eps_flat / eps_norm
-                        scale = self.config.gram_sigma_alpha * delta_norm_t
-                        eps_t = (eps_unit * scale.unsqueeze(-1)).reshape_as(eps_t)
-                        all_gram_effective_sigma.append(scale.mean().detach())
-
-                    # Carry: perturbed for next step, clean at last step
-                    hidden = u_t + eps_t if step < N - 1 else u_t
+                    # Terminal: decode from perturbed h_final (ELBO reconstruction term)
+                    logits = self.inner.lm_head(h_final)[:, P + R:]
+                    q_logits = self.inner.q_head(h_final[:, 0]).to(torch.float32).squeeze(-1)
+                    hidden = h_final
                 else:
+                    # Steps 0..N-2 (or all steps when GRAM disabled): decode from clean u_t
+                    logits = self.inner.lm_head(u_t)[:, P + R:]
+                    q_logits = self.inner.q_head(u_t[:, 0]).to(torch.float32).squeeze(-1)
                     hidden = u_t
 
                 # Recurrence noise: additive Gaussian on hidden state (training only)

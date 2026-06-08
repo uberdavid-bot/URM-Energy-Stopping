@@ -118,7 +118,7 @@ class EnergyLossHead(nn.Module):
             )
             total_loss = total_loss + self.energy_loss_weight * ranking_loss
 
-        # R7a: GRAM KL loss (with R7c2 warmup + free-bits)
+        # R7e: single terminal KL (was per-step mean in R7a-d)
         gram_kl_mean = None
         if gram_kl is not None and len(gram_kl) > 0:
             gram_kl_mean = torch.stack(gram_kl).mean()
@@ -273,19 +273,15 @@ class EnergyLossHead(nn.Module):
             # R7a: GRAM metrics
             if gram_kl_mean is not None:
                 metrics["gram_kl"] = gram_kl_mean.detach() * metrics["count"]
-            # R7d: per-step effective injection sigma (mean across steps)
-            if gram_effective_sigma is not None and len(gram_effective_sigma) > 0:
-                sigma_eff_mean = torch.stack(gram_effective_sigma).mean()
-                metrics["gram_sigma_effective"] = sigma_eff_mean * metrics["count"]
             if self.model.config.gram_enabled:
                 with torch.no_grad():
-                    sample_pre = all_hidden[0] + input_embeddings
+                    # Probe prior sigma at terminal state
                     k = self.model.config.gram_latent_dim
                     if k > 0:
-                        pooled = sample_pre.mean(dim=1)
+                        pooled = all_hidden[-1].mean(dim=1)
                         prior_out = self.model.gram_prior_mlp(pooled)
                     else:
-                        prior_out = self.model.gram_prior_mlp(sample_pre)
+                        prior_out = self.model.gram_prior_mlp(all_hidden[-1])
                     _, logvar_p = self.model._gram_split(prior_out)
                     sigma_mean = torch.exp(0.5 * logvar_p).mean()
                     metrics["gram_sigma_mean"] = sigma_mean * metrics["count"]

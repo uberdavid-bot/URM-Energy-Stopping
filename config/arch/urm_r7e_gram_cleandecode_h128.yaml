@@ -1,7 +1,8 @@
-# R7e — GRAM-faithful clean decode: logits always from deterministic u_t,
-# perturbation only affects carry to next step. Fixes R7d's structural bug
-# where σ was calibrated to pre-forward delta but ε injected post-forward.
-# All other settings identical to R7d (α=0.2).
+# R7e — Terminal-only GRAM: steps 0..N-2 fully deterministic,
+# stochasticity applied ONLY at terminal step N-1 with learned σ_θ.
+# Terminal prediction decodes from u_{N-1} + eps (the perturbed state).
+# Single KL(posterior || prior) at terminal step only.
+# k=16 low-rank bottleneck; learned σ (not delta-norm-calibrated).
 name: urm.urm_energy@ARCModel
 loss:
   name: losses@EnergyLossHead
@@ -37,7 +38,7 @@ gram_latent_dim: 16
 gram_detach_posterior_recon: false
 gram_kl_warmup_steps: 1500
 gram_free_bits: 0.0
-gram_sigma_alpha: 0.2
+gram_sigma_alpha: 0.0
 
 ema: True
 ema_rate: 0.999

@@ -1590,24 +1590,29 @@ Despite fixing anti-refinement, R7d still pays a large accuracy tax. Delta norms
 
 These bugs mean R7d didn't actually test "clean GRAM" — it tested a hybrid where noise leaked into both the calibration signal and the decoding path. → R7e.
 
-### R7e — GRAM-faithful clean decode (fixes R7d structural bugs)
+### R7e — Terminal-only GRAM (abandons per-step trajectory noise)
 
 Date: 2026-06-07
 Config: `config/arch/urm_r7e_gram_cleandecode_h128.yaml`
 Baseline: R4d (21.25% eval exact), R7d (11.83% eval exact — negative).
 
-**Two structural fixes vs R7d:**
-1. **Decode from clean u_t:** The forward loop now computes u_t = transformer(hidden + input_emb), decodes logits from u_t immediately, THEN computes ε and sets carry = u_t + ε_t. Logits never see perturbation noise. This is faithful to the GRAM paper where the generative model decodes from the deterministic state.
-2. **σ calibrated at injection point:** σ_t = α · ‖u_t − hidden‖ where u_t is the post-transformer state. The calibration and injection now reference the same quantities.
+**Design pivot:** R7a–R7d injected GRAM noise at every recurrence step. The persistent finding was an eval accuracy tax — per-step perturbation prevents convergence to the tight fixed points ARC needs, even when calibrated (R7d: −9.42pp). R7e abandons per-step trajectory noise entirely.
 
-**What this eliminates:** The `gram_predecode` flag and its associated branching. R7e is a clean cutover — one code path, no legacy mode. The old `gram_predecode` config field is retained for backward-compat with old YAML configs but is no longer read.
+**New mechanism — terminal-only stochasticity:**
+- Steps 0..N-2: fully deterministic. u_t = transformer(hidden + input_emb). Decode from clean u_t. Carry = u_t. No prior/posterior, no ε, no KL.
+- Step N-1 (terminal): u_{N-1} = transformer(hidden + input_emb). Sample ε from posterior (training) or prior (eval). h_final = u_{N-1} + ε. **Decode from h_final** (the perturbed state). This is the one intentional decode-of-perturbed-state — the terminal prediction IS the ELBO reconstruction term.
+- Single KL(posterior ‖ prior) at terminal step only (was mean over N per-step KLs in R7a–d).
 
-**Hypothesis:** R7d's −9.42pp accuracy tax was an artifact of decode corruption and calibration mismatch, not an inherent property of stochastic latent transitions. If R7e recovers to near R4d accuracy while maintaining stochastic diversity, the door reopens for GRAM as a pass@K mechanism.
+**What this preserves:** k=16 low-rank bottleneck (R7c), learned σ_θ from prior/posterior MLPs. Delta-norm σ rescaling (R7d `gram_sigma_alpha`) is removed — terminal σ is the learned σ_θ, not delta-norm-calibrated.
 
-**Null hypothesis:** Even with clean decode, perturbation prevents convergence to tight fixed points and accuracy remains well below R4d. This would close the GRAM line entirely — the recurrence's value IS its deterministic convergence, and any perturbation (however small or well-calibrated) trades accuracy for nothing.
+**Hypothesis:** Per-step trajectory noise (R7a–d) disrupts convergence. Applying learned stochasticity ONLY at the terminal converged state — and decoding the perturbed state — should preserve R4d's deterministic accuracy on the backbone while creating a learned terminal exploration distribution for parallel-decode inference. Open question: whether terminal samples are diverse-yet-coherent (escape the fixed point without falling off-manifold).
 
-**Held fixed:** k=16 bottleneck, α=0.2, β=0.1, KL warmup 1500 steps, h=128, loops=8.
+**Null hypothesis:** Even terminal-only perturbation degrades accuracy because lm_head requires exact fixed-point hidden states. This would mean the recurrence's value is fully captured by its deterministic output, and stochastic diversity must come from input augmentation (R5c's pass@K mechanism), not hidden-space perturbation.
 
-**Params:** ~168K (identical to R7d — only control flow changed, no new parameters).
+**Note:** k=16 low-rank/shared; learned σ_θ (not delta-norm); single terminal KL. Defers the four-arm parallel-decode harness to R7e-eval.
 
-**Verified:** 54/54 tests pass, including 3 new clean-decode tests asserting: (1) GRAM logits are reproducible with α=0, (2) gram_enabled=False matches non-GRAM baseline, (3) carry is perturbed but logits derive from clean u_t.
+**Held fixed from R4d:** h=128, depth=1, 8 steps, expansion=2, dropout=0.1, batch 512, lr 3e-4, EMA 0.999, BF16, stablemax, ~80K steps. GRAM additions: β=0.1, KL warmup 1500 steps, k=16.
+
+**Params:** ~168K (same GRAM modules as R7d — prior_mlp, posterior_mlp, up_proj. Only control flow changed).
+
+**Verified:** 59/59 tests pass, including 5 new terminal-only tests asserting: (1) exactly 1 KL per trajectory, (2) non-terminal steps deterministic and match non-GRAM baseline, (3) eval produces no KL, (4) zero-eps recovers deterministic output, (5) terminal logits derive from h_final = u_{N-1} + ε.

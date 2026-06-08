@@ -633,5 +633,93 @@ class TestGRAMTerminalOnly:
             "Terminal logits should equal lm_head(h_final) where h_final = u_{N-1} + eps"
 
 
+class TestForwardGramSamplesEfficiency:
+    """R7e: forward_gram_samples runs backbone once, draws M terminal samples."""
+
+    def test_backbone_independent_of_M(self):
+        """The deterministic trajectory is computed once regardless of M."""
+        config = make_config(
+            loops=4,
+            gram_enabled=True,
+            gram_latent_dim=16,
+            gram_beta=0.1,
+        )
+        model = ARCModel(config).to(DEVICE).eval()
+        batch = make_batch(config)
+
+        # _run_deterministic_trajectory should be called exactly once
+        call_count = 0
+        orig_run = model._run_deterministic_trajectory
+
+        def counting_run(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return orig_run(*args, **kwargs)
+
+        model._run_deterministic_trajectory = counting_run
+
+        with torch.no_grad():
+            preds, q = model.forward_gram_samples(batch, M=10)
+
+        assert call_count == 1, f"Backbone ran {call_count} times, expected 1"
+        assert preds.shape == (10, config["batch_size"], config["seq_len"])
+        assert q.shape == (10, config["batch_size"])
+
+    def test_deterministic_mode_returns_single_sample(self):
+        """deterministic=True returns shape [1, B, seq_len] with no eps."""
+        config = make_config(
+            loops=4,
+            gram_enabled=True,
+            gram_latent_dim=16,
+            gram_beta=0.1,
+        )
+        model = ARCModel(config).to(DEVICE).eval()
+        batch = make_batch(config)
+
+        with torch.no_grad():
+            preds, q = model.forward_gram_samples(batch, M=5, deterministic=True)
+
+        assert preds.shape == (1, config["batch_size"], config["seq_len"])
+        assert q.shape == (1, config["batch_size"])
+
+    def test_deterministic_matches_non_gram_baseline(self):
+        """Deterministic forward_gram_samples matches a non-GRAM forward_trajectory."""
+        base_config = make_config(loops=4, gram_enabled=False)
+        gram_config = make_config(loops=4, gram_enabled=True, gram_latent_dim=16, gram_beta=0.1)
+
+        torch.manual_seed(42)
+        base_model = ARCModel(base_config).to(DEVICE).eval()
+        torch.manual_seed(42)
+        gram_model = ARCModel(gram_config).to(DEVICE).eval()
+
+        batch = make_batch(base_config)
+
+        with torch.no_grad():
+            base_logits, _, _, _, _, _ = base_model.forward_trajectory(batch)
+            base_preds = torch.argmax(base_logits[-1], dim=-1)
+
+            gram_preds, _ = gram_model.forward_gram_samples(batch, M=1, deterministic=True)
+
+        assert torch.equal(base_preds, gram_preds[0]), \
+            "Deterministic gram_samples should match non-GRAM baseline predictions"
+
+    def test_multiple_samples_correct_shape(self):
+        """M>1 produces correct output shapes."""
+        config = make_config(
+            loops=4,
+            gram_enabled=True,
+            gram_latent_dim=16,
+            gram_beta=0.1,
+        )
+        model = ARCModel(config).to(DEVICE).eval()
+        batch = make_batch(config)
+
+        with torch.no_grad():
+            preds, q = model.forward_gram_samples(batch, M=20)
+
+        assert preds.shape == (20, config["batch_size"], config["seq_len"])
+        assert q.shape == (20, config["batch_size"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

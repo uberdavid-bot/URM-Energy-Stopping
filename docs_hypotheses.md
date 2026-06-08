@@ -1615,4 +1615,50 @@ Baseline: R4d (21.25% eval exact), R7d (11.83% eval exact — negative).
 
 **Params:** ~168K (same GRAM modules as R7d — prior_mlp, posterior_mlp, up_proj. Only control flow changed).
 
-**Verified:** 59/59 tests pass, including 5 new terminal-only tests asserting: (1) exactly 1 KL per trajectory, (2) non-terminal steps deterministic and match non-GRAM baseline, (3) eval produces no KL, (4) zero-eps recovers deterministic output, (5) terminal logits derive from h_final = u_{N-1} + ε.
+**Verified:** 63/63 tests pass, including 5 terminal-only tests and 4 forward_gram_samples efficiency tests.
+
+### R7e-eval — Parallel-decode harness (augmentation vs perturbation diversity)
+
+Date: 2026-06-07
+Script: `scripts/eval_parallel_decode.py`
+Checkpoint: `R7e-gram-terminal-h128-260607/step_80011.pt` (80K steps)
+
+**Design:** Three-arm comparison at matched total decode budget N ∈ {5, 10, 100, 1000}:
+- **ARM A (augmentation-only):** N augmentations × 1 deterministic decode (eps=0). Pure input-transform diversity.
+- **ARM B (perturb-only):** 1 augmentation × N terminal prior samples. Pure hidden-space diversity.
+- **ARM C (cross):** M augmentations × K terminal samples, M·K=N. Tests compounding.
+
+All arms use identical inverse-augment → hash → dedup → Q-based pass@K ranking code.
+
+**Efficiency refactor:** `forward_gram_samples` now runs the backbone (N transformer passes) once and draws M terminal eps from the cached u_{N-1}. 163 backbone forward passes + 79,480 terminal eps draws completed in 52.4s total.
+
+**Results:**
+
+| N | Arm | pass@1 | pass@N | distinct | config |
+|---:|------:|-------:|-------:|---------:|-------:|
+| 5 | A-aug | 16.23% | 24.03% | 4.1 | 5 augs × 1 det |
+| 5 | B-pert | 20.78% | 24.03% | 3.4 | 1 aug × 5 eps |
+| 5 | C-cross | 20.78% | 24.03% | 3.4 | 1×5 |
+| 10 | A-aug | 18.83% | 30.52% | 7.7 | 10 augs × 1 det |
+| 10 | B-pert | 19.48% | 24.68% | 5.9 | 1 aug × 10 eps |
+| 10 | C-cross | 20.13% | 24.03% | 6.5 | 2×5 |
+| 100 | A-aug | 27.92% | 39.61% | 64.5 | 100 augs × 1 det |
+| 100 | B-pert | 19.48% | 26.62% | 29.6 | 1 aug × 100 eps |
+| 100 | C-cross | 20.78% | 35.06% | 51.3 | 10×10 |
+| 1000 | A-aug | 27.27% | 43.51% | 500.6 | 1000 augs × 1 det |
+| 1000 | B-pert | 19.48% | 26.62% | 141.5 | 1 aug × 1000 eps |
+| 1000 | C-cross | 21.43% | 40.91% | 354.9 | 25×40 |
+
+**Orthogonality verdict: REDUNDANT at all N.** ARM C never beats the better of A and B. Augmentation dominates:
+- At N=100: A 39.61% vs C 35.06% (−4.55pp). Swapping 90 augmentations for 10×10 eps hurts.
+- At N=1000: A 43.51% vs C 40.91% (−2.60pp). Same pattern, smaller gap.
+- ARM B saturates at pass@N ≈ 26.62% by N≥100 despite 141.5 distinct grids at N=1000. Terminal perturbation generates diverse but mostly incoherent predictions.
+
+**Key findings:**
+1. **Perturbation diversity is substantial but low-quality.** ARM B produces 141.5 distinct grids at N=1000 (vs 500.6 for augmentation), but these grids don't contain the answer — pass@1000 is 26.62% vs 43.51%. The prior's learned σ generates variety but falls off the manifold of valid ARC solutions.
+2. **Augmentation diversity is strictly superior.** At every N, ARM A outperforms ARM B on pass@N. The gap widens with N (0pp at N=5, +16.89pp at N=1000). Input-space transforms preserve solution structure; hidden-space perturbation does not.
+3. **No compounding.** ARM C underperforms ARM A at N≥10, meaning perturbation samples actively dilute the prediction pool. The Q-based ranking cannot compensate.
+4. **pass@1 anomaly:** ARM B pass@1 (19.48-20.78%) exceeds ARM A pass@1 (16.23-27.27%) at small N. This likely reflects the prior's mild smoothing effect on the terminal decode, not perturbation quality — it vanishes at higher N where augmentation's ranked diversity takes over.
+5. **Compute asymmetry confirmed:** 163 backbone forward passes + 79K terminal draws = 52.4s. Terminal draws are ~100× cheaper per decode than backbone passes.
+
+**Conclusion:** Terminal-only GRAM (R7e) generates diverse hidden-space perturbations but these are redundant with (and inferior to) input augmentation for ARC pass@K. The recurrence's value is in its deterministic convergence; stochastic exploration in hidden space doesn't find new valid solutions. This closes the GRAM line — hidden-space diversity at any injection point (per-step R7a-d or terminal-only R7e) does not improve over augmentation-based diversity.

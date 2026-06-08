@@ -533,19 +533,74 @@ class ARCModel(nn.Module):
         gram_effective_sigma = all_gram_effective_sigma if all_gram_effective_sigma else None
         return all_logits, all_q_logits, all_hidden, input_embeddings, gram_kl, gram_effective_sigma
 
-    def forward_gram_samples(self, batch: Dict[str, torch.Tensor], M: int):
-        """Run M independent prior-sampled trajectories (eval only).
+    def _run_deterministic_trajectory(self, batch: Dict[str, torch.Tensor], N: Optional[int] = None):
+        """Run N deterministic recurrence steps (no GRAM), return terminal u_N and input_embeddings.
+
+        Shared backbone computation for forward_gram_samples — computed once
+        regardless of how many terminal eps samples are drawn.
+        """
+        N = N or self.config.loops
+        input_embeddings = self.inner._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
+        seq_info = dict(cos_sin=self.inner.rotary_emb())
+        P = self.inner.puzzle_emb_len
+        R = self.config.num_registers
+
+        hidden = self.inner.init_hidden.expand(
+            batch["inputs"].shape[0],
+            self.inner.config.seq_len + P + R, -1
+        ).clone()
+
+        for step in range(N):
+            pre_t = hidden + input_embeddings
+            u_t = pre_t
+            for layer in self.inner.layers:
+                u_t = layer(hidden_states=u_t, **seq_info)
+            hidden = u_t
+
+        return u_t, input_embeddings
+
+    def forward_gram_samples(self, batch: Dict[str, torch.Tensor], M: int,
+                             deterministic: bool = False):
+        """R7e-efficient: run backbone once, draw M terminal eps samples.
+
+        Under terminal-only GRAM, M prior samples differ only at the terminal
+        step. The deterministic trajectory (N transformer passes) is computed
+        once; each additional terminal sample costs only a prior MLP + linear
+        projection — orders of magnitude cheaper than a full forward pass.
+
+        If deterministic=True or gram not enabled, returns 1 decode with eps=0.
 
         Returns:
-            all_preds: [M, B, seq_len] — argmax grid predictions per trajectory
-            all_q_logits: [M, B] — final-step Q-halt logits per trajectory
+            all_preds: [M, B, seq_len] — argmax predictions per terminal sample
+            all_q_logits: [M, B] — Q-halt logits per terminal sample
         """
+        P = self.inner.puzzle_emb_len
+        R = self.config.num_registers
+
+        u_N, _ = self._run_deterministic_trajectory(batch)
+
+        if deterministic or not self.config.gram_enabled:
+            logits = self.inner.lm_head(u_N)[:, P + R:]
+            preds = torch.argmax(logits, dim=-1)
+            q = self.inner.q_head(u_N[:, 0]).to(torch.float32).squeeze(-1)
+            return preds.unsqueeze(0), q.unsqueeze(0)
+
+        k = self.config.gram_latent_dim
+        assert k > 0, "R7e requires gram_latent_dim > 0"
+
+        pooled = u_N.mean(dim=1)
+        mu_p, logvar_p = self._gram_split(self.gram_prior_mlp(pooled))
+
         all_preds = []
         all_q_logits = []
         for _ in range(M):
-            logits_list, q_list, _, _, _, _ = self.forward_trajectory(batch)
-            final_preds = torch.argmax(logits_list[-1], dim=-1)
-            final_q = q_list[-1]
-            all_preds.append(final_preds)
-            all_q_logits.append(final_q)
+            z = self._gram_reparam(mu_p, logvar_p)
+            eps_t = self.gram_up_proj(z).unsqueeze(1).expand_as(u_N)
+            h_final = u_N + eps_t
+            logits = self.inner.lm_head(h_final)[:, P + R:]
+            preds = torch.argmax(logits, dim=-1)
+            q = self.inner.q_head(h_final[:, 0]).to(torch.float32).squeeze(-1)
+            all_preds.append(preds)
+            all_q_logits.append(q)
+
         return torch.stack(all_preds, dim=0), torch.stack(all_q_logits, dim=0)

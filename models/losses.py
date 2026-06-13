@@ -39,6 +39,147 @@ def softmax_cross_entropy(logits, labels, ignore_index: int = -100):
     return F.cross_entropy(logits.to(torch.float32).view(-1, logits.shape[-1]), labels.to(torch.long).view(-1), ignore_index=ignore_index, reduction="none").view(labels.shape)
 
 
+class HLLossHead(nn.Module):
+    """R8a: TRM-recipe loss head for the H/L hierarchical model (urm_hl@HLModel).
+
+    Training: forward(batch, carry=...) runs ONE supervision step (full backprop
+    through all fL/fH evals within the step) and returns a DETACHED (h, l) carry.
+    pretrain.train_batch_hl loops n_sup times, with backward + optimizer step per
+    call (TRM deep supervision). Loss per step: CE on the single decode + Q-halt
+    BCE (halt-only, no continue loss). No Q-halt early exit — compute is
+    deterministic; the halt loss is trained but never gates execution.
+
+    Eval: forward(batch) runs all n_sup supervision steps under the caller's
+    no_grad, logging per-supervision-step exact accuracy (step_k_*) and Q-halt
+    stopping metrics across the n_sup decodes.
+    """
+    is_hl = True
+
+    def __init__(self, model: nn.Module, loss_type: str):
+        super().__init__()
+        self.model = model
+        self.loss_fn = globals()[loss_type]
+        self.n_sup = model.config.n_sup
+        self.current_step = 0
+
+    def forward(
+        self,
+        batch: Dict[str, torch.Tensor],
+        return_keys: Sequence[str] = (),
+        carry: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> Tuple[Any, torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
+        labels = batch["labels"]
+        mask = labels != IGNORE_LABEL_ID
+        loss_counts = mask.sum(-1)
+        loss_divisor = loss_counts.clamp_min(1).unsqueeze(-1)
+        valid = loss_counts > 0
+        B = labels.shape[0]
+        device = labels.device
+
+        input_embeddings = self.model.input_embeddings(batch)
+
+        if self.training:
+            h, l = carry if carry is not None else self.model.initial_state(B)
+            h, l, logits, q_logits = self.model.forward_supervision_step(h, l, input_embeddings)
+
+            recon_loss = (self.loss_fn(logits, labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
+            with torch.no_grad():
+                preds = torch.argmax(logits.detach(), dim=-1)
+                tok_correct = mask & (preds == labels)
+                seq_correct = tok_correct.sum(-1) == loss_counts
+            qhalt_loss = F.binary_cross_entropy_with_logits(
+                q_logits, seq_correct.to(q_logits.dtype), reduction="sum"
+            )
+            total_loss = recon_loss + 0.5 * qhalt_loss
+
+            with torch.no_grad():
+                metrics = {
+                    "count": valid.sum(),
+                    "accuracy": torch.where(valid, (tok_correct.to(torch.float32) / loss_divisor).sum(-1), 0).sum(),
+                    "exact_accuracy": (valid & seq_correct).sum(),
+                    "reconstruction_loss": recon_loss.detach(),
+                    "q_halt_loss": qhalt_loss.detach(),
+                    "q_halt_accuracy": (valid & ((q_logits >= 0) == seq_correct)).sum(),
+                }
+
+            return (h.detach(), l.detach()), total_loss, metrics, {}, torch.tensor(True, device=device)
+
+        # --- Eval: run all n_sup supervision steps ---
+        N = self.n_sup
+        h, l = self.model.initial_state(B)
+        all_logits, all_q_logits, all_h = [], [], []
+        for _ in range(N):
+            h, l, logits, q_logits = self.model.forward_supervision_step(h, l, input_embeddings)
+            all_logits.append(logits)
+            all_q_logits.append(q_logits)
+            all_h.append(h)
+
+        final_logits = all_logits[-1]
+        recon_loss = (self.loss_fn(final_logits, labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()
+        final_preds = torch.argmax(final_logits, dim=-1)
+        final_correct = mask & (final_preds == labels)
+        final_seq_correct = final_correct.sum(-1) == loss_counts
+        qhalt_loss = F.binary_cross_entropy_with_logits(
+            all_q_logits[-1], final_seq_correct.to(all_q_logits[-1].dtype), reduction="sum"
+        )
+        total_loss = recon_loss + 0.5 * qhalt_loss
+
+        metrics = {
+            "count": valid.sum(),
+            "accuracy": torch.where(valid, (final_correct.to(torch.float32) / loss_divisor).sum(-1), 0).sum(),
+            "exact_accuracy": (valid & final_seq_correct).sum(),
+            "reconstruction_loss": recon_loss,
+            "q_halt_loss": qhalt_loss,
+            "q_halt_accuracy": (valid & ((all_q_logits[-1] >= 0) == final_seq_correct)).sum(),
+        }
+
+        # Per-supervision-step metrics (step_k_* names mirror the single-module
+        # dashboards; here "step" = supervision step, k in 1..n_sup)
+        step_exact_cols = []
+        for t in range(N):
+            step_preds_t = torch.argmax(all_logits[t], dim=-1)
+            step_tok_correct = mask & (step_preds_t == labels)
+            step_seq_correct = step_tok_correct.sum(-1) == loss_counts
+            step_exact_cols.append(step_seq_correct)
+            metrics[f"step_{t+1}_accuracy"] = torch.where(
+                valid, (step_tok_correct.to(torch.float32) / loss_divisor).sum(-1), 0
+            ).sum()
+            metrics[f"step_{t+1}_exact_accuracy"] = (valid & step_seq_correct).sum()
+            if t > 0:
+                # Per-position L2 delta of h between supervision steps, summed
+                # over batch (pretrain's /count yields the per-sample mean)
+                metrics[f"step_{t+1}_delta_norm"] = (
+                    (all_h[t] - all_h[t - 1]).norm(dim=-1).mean(dim=-1).sum()
+                )
+
+        # Q-halt stopping across the n_sup decodes (secondary metric)
+        q_preds = torch.stack(all_q_logits, dim=1)  # [B, N]
+        q_halt_mask = q_preds >= 0
+        step_exact = torch.stack(step_exact_cols, dim=1)  # [B, N]
+        q_any_halt = q_halt_mask.any(dim=1)
+        q_first_halt = torch.where(
+            q_any_halt,
+            q_halt_mask.to(torch.float32).argmax(dim=1) + 1,
+            torch.full((B,), N, device=device, dtype=torch.float32),
+        )
+        metrics["qhalt_stop_step"] = torch.where(valid, q_first_halt, 0).sum()
+        q_stop_idx = (q_first_halt - 1).long().clamp(0, N - 1)
+        q_stop_correct = step_exact.gather(1, q_stop_idx.unsqueeze(1)).squeeze(1)
+        metrics["qhalt_stop_accuracy"] = (valid & q_stop_correct).sum()
+
+        # Final outputs for evaluators. No energy head in HL — zeros keep
+        # arc.py's required_outputs contract; energy-ranked pass@K is meaningless.
+        final_outputs = {
+            "logits": final_logits,
+            "preds": final_preds,
+            "q_halt_logits": all_q_logits[-1],
+            "current_energy": torch.zeros_like(all_q_logits[-1]),
+        }
+        returned_outputs = {k: final_outputs[k] for k in return_keys if k in final_outputs}
+
+        return None, total_loss, metrics, returned_outputs, torch.tensor(True, device=device)
+
+
 class EnergyLossHead(nn.Module):
     def __init__(self, model: nn.Module, loss_type: str, energy_loss_weight: float = 0.0, ranking_margin: float = 0.1,
                  shuffle_trajectory_quality: bool = False, detach_energy_hidden: bool = False,

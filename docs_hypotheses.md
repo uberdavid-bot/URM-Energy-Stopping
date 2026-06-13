@@ -1662,3 +1662,38 @@ All arms use identical inverse-augment → hash → dedup → Q-based pass@K ran
 5. **Compute asymmetry confirmed:** 163 backbone forward passes + 79K terminal draws = 52.4s. Terminal draws are ~100× cheaper per decode than backbone passes.
 
 **Conclusion:** Terminal-only GRAM (R7e) generates diverse hidden-space perturbations but these are redundant with (and inferior to) input augmentation for ARC pass@K. The recurrence's value is in its deterministic convergence; stochastic exploration in hidden space doesn't find new valid solutions. This closes the GRAM line — hidden-space diversity at any injection point (per-step R7a-d or terminal-only R7e) does not improve over augmentation-based diversity.
+
+## R8 series — Hierarchical H/L structure (paper-faithful deep supervision)
+
+### R8a — Restore H/L hierarchy with TRM training recipe (deterministic)
+
+Date: 2026-06-12
+Config: `config/arch/urm_r8a_hl_h128.yaml`
+Script: `scripts/train_r8a_hl.sh`
+Run name: `R8a-hl-det-h128-<date>`
+
+**Variable changed: "restore paper structure"** — a deliberate bundle of three coupled changes that together constitute the HRM/GRAM hierarchical structure with the TRM training recipe. R4d's per-eval dense supervision was a flattened approximation of this; the bundle is the unit under test, not any single component:
+1. **H/L modules**: two SEPARATE-parameter modules fL and fH, each a full URM block at h=128 (same block config as R4d). State z = (h, l). One supervision step = `for t in 1..T(=2): { for k in 1..K(=3): l = fL(l + h + e_x) }; h = fH(h + l)`. Input e_x injected at every L eval, never into fH.
+2. **One decode per supervision step**: logits = lm_head(h) after the final fH only. No intermediate decodes. fL is never decoded or directly supervised — its gradient arrives via fH. Q-halt head reads h at the puzzle-token position.
+3. **Detach-between-steps carry + per-step optimization (TRM recipe)**: Nsup=4 supervision steps per batch; (h, l) carried detached between steps; backward + optimizer step PER supervision step; full backprop within a step (all 6 fL + 2 fH evals — no 1-step gradient approximation). Loss per step: single CE on the one decode + Q-halt BCE (halt-only, no continue loss). NO Q-halt early exit — halt loss is trained but all 4 supervision steps always run (deterministic compute).
+
+**Implementation:** `models/urm/urm_hl.py` (`HLModel`: fL = reused `ARCBackbone.layers`, fH = separate `ARCBlock` list, h0/l0 fixed random draws saved as persistent buffers per GRAM convention), `losses.HLLossHead` (train = one supervision step per call, returns detached carry; eval = full Nsup loop), `pretrain.train_batch_hl` (per-supervision-step backward/optimizer; `train_state.step` counts BATCHES so LR schedule and eval cadence match single-module runs).
+
+**Budget:** same number of BATCHES as R4d's 80K-step run (epochs=31590, batch 512) — i.e. 4× the optimizer steps (320K) and ~4× wall-clock (~8h on 3090).
+
+**Params:** ~271K total (fL 133.6K + fH 133.6K + embed/lm/q). Sits between R4e h=160 (211K) and R5a h=192 (301K) — approx param-matched to the h=160 single-module baseline.
+
+**Metrics:** headline = eval `step_4_exact_accuracy` (≡ `exact_accuracy`, decode at supervision step 4); per-step curve `step_{1..4}_exact_accuracy` logged at train and eval; `qhalt_stop_accuracy` secondary. Note: for R8a, "step" = supervision step (4 decodes), not recurrence step.
+
+**Decision rule (pre-committed):** compare step-4 eval exact_accuracy vs R4d (~21.25%) and vs the h=160 single-module baseline R4e (23.72%, approx param-matched).
+- **Beat both** → proceed to ablations (half-width modules, lower Nsup), then terminal noise injection (R8c).
+- **Lose to both by >2pp** → hierarchy negative at this scale; discuss before further runs.
+- In between → param-confounded; discuss.
+
+**Hypothesis:** the H/L separation gives the model a slow/fast timescale split (fH integrates, fL iterates against the input) that the flat single-module recurrence approximates poorly, and per-supervision-step optimization with detached carry trains a genuine "improve from any intermediate state" operator (TRM's mechanism) rather than a fixed-depth unrolled computation.
+
+**Null hypothesis:** at this scale, width is the only lever (R4/R5 finding); the hierarchy just spends 2× params on a structural prior ARC-10×10 doesn't need, and detached carry forfeits the full-trajectory credit assignment that deep supervision with undetached gradients provided.
+
+**Held fixed from R4d:** h=128, depth=1 per module, expansion=2, heads=4, dropout=0.1 (attn+mlp), batch 512, lr 3e-4 (constant after 100-step warmup), AdamATan2 β=(0.9, 0.95), wd=0.1, EMA 0.999, BF16, stablemax CE, 8 block evals per batch-forward (R4d: 8 recurrence steps; R8a: 4 sup steps × (6 fL + 2 fH) = 32 evals/batch but 8 per supervision step).
+
+**Verified:** (pending GPU — NVIDIA driver module missing for running kernel at implementation time) tests in `tests/test_hl_model.py`; smoke test `scripts/smoke_r8a.py` (200 batches: loss decrease, fL+fH grad norms, VRAM, throughput).

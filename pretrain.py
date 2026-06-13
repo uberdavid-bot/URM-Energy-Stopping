@@ -465,6 +465,123 @@ def create_evaluators(config: PretrainConfig, eval_metadata: PuzzleDatasetMetada
     return evaluators
 
 
+def _reduce_train_metrics(
+    metrics: dict,
+    global_batch_size: int,
+    rank: int,
+    world_size: int,
+    lr_this_step: Optional[float],
+):
+    """Reduce per-batch training metrics to rank 0 and normalize for logging."""
+    if not len(metrics):
+        return None
+
+    assert not any(getattr(v, 'requires_grad', False) for v in metrics.values())
+
+    metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
+    # Reduce and reconstruct
+    metric_values = torch.stack([metrics[k] for k in metric_keys])
+    if world_size > 1:
+        dist.reduce(metric_values, dst=0)
+
+    if rank != 0:
+        return None
+
+    metric_values = metric_values.cpu().numpy()
+    reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
+
+    # Postprocess
+    count = max(reduced_metrics.get("count", 0), 1)  # Avoid NaNs
+
+    def _normalize_metric(key: str, value: float) -> float:
+        if key.startswith("profile/"):
+            return value / world_size
+        if key.endswith("loss"):
+            return value / global_batch_size
+        return value / count
+
+    reduced_metrics = {f"train/{k}": _normalize_metric(k, v) for k, v in reduced_metrics.items()}
+
+    reduced_metrics["train/lr"] = lr_this_step
+    return reduced_metrics
+
+
+def _allreduce_grads(model: nn.Module, world_size: int):
+    if world_size <= 1:
+        return
+    for param in model.parameters():
+        if not param.requires_grad:
+            continue
+
+        grad = param.grad
+        if grad is None:
+            grad = torch.zeros_like(param)
+        dist.all_reduce(grad)
+
+
+def train_batch_hl(
+    config: PretrainConfig,
+    train_state: TrainState,
+    batch: Any,
+    global_batch_size: int,
+    rank: int,
+    world_size: int,
+):
+    """R8a TRM recipe: n_sup supervision steps per batch, backward + optimizer
+    step PER supervision step, (h, l) carry detached between steps (the loss
+    head returns it detached).
+
+    train_state.step counts BATCHES so the LR schedule, eval cadence, and
+    total budget match single-module runs at the same `epochs`; optimizer
+    steps = n_sup * batches. All supervision steps within a batch share one LR.
+    """
+    assert max(1, getattr(config, "grad_accum_steps", 1)) == 1, \
+        "HL training does not support gradient accumulation"
+    if train_state.step >= train_state.total_steps:
+        return
+
+    batch = {k: v.cuda() for k, v in batch.items()}
+    n_sup = train_state.model.n_sup
+    loss_scale = 1.0 / global_batch_size
+
+    carry = None
+    sup_metrics = []
+    lr_this_step = None
+
+    for _s in range(n_sup):
+        carry, loss, metrics, _, _ = train_state.model(
+            batch=batch, return_keys=[], carry=carry
+        )
+        (loss_scale * loss).backward()
+
+        _allreduce_grads(train_state.model, world_size)
+
+        if config.grad_clip_backbone > 0:
+            params = [p for p in train_state.model.parameters() if p.grad is not None]
+            torch.nn.utils.clip_grad_norm_(params, config.grad_clip_backbone)
+
+        for optim, base_lr in zip(train_state.optimizers, train_state.optimizer_lrs):
+            lr_this_step = compute_lr(base_lr, config, train_state)
+            for param_group in optim.param_groups:
+                param_group["lr"] = lr_this_step
+            optim.step()
+            optim.zero_grad()
+
+        sup_metrics.append(metrics)
+
+    train_state.step += 1
+
+    # Headline metrics from the final supervision step, plus a per-step curve
+    # (step_k_* mirrors eval naming; here "step" = supervision step).
+    combined = dict(sup_metrics[-1])
+    for s, m in enumerate(sup_metrics):
+        combined[f"step_{s+1}_accuracy"] = m["accuracy"]
+        combined[f"step_{s+1}_exact_accuracy"] = m["exact_accuracy"]
+        combined[f"step_{s+1}_reconstruction_loss"] = m["reconstruction_loss"]
+
+    return _reduce_train_metrics(combined, global_batch_size, rank, world_size, lr_this_step)
+
+
 def train_batch(
     config: PretrainConfig,
     train_state: TrainState,
@@ -473,6 +590,9 @@ def train_batch(
     rank: int,
     world_size: int,
 ):
+    if getattr(train_state.model, "is_hl", False):
+        return train_batch_hl(config, train_state, batch, global_batch_size, rank, world_size)
+
     accum_steps = max(1, getattr(config, "grad_accum_steps", 1))
     if train_state.step >= train_state.total_steps:  # At most train_total_steps
         return
@@ -495,15 +615,7 @@ def train_batch(
         return
 
     # Allreduce
-    if world_size > 1:
-        for param in train_state.model.parameters():
-            if not param.requires_grad:
-                continue
-
-            grad = param.grad
-            if grad is None:
-                grad = torch.zeros_like(param)
-            dist.all_reduce(grad)
+    _allreduce_grads(train_state.model, world_size)
 
     # Separate gradient clipping for energy head vs backbone
     if config.grad_clip_backbone > 0 or config.grad_clip_energy_head > 0:
@@ -531,33 +643,7 @@ def train_batch(
     train_state.accum_step = 0
 
     # Reduce metrics
-    if len(metrics):
-        assert not any(getattr(v, 'requires_grad', False) for v in metrics.values())
-
-        metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
-        # Reduce and reconstruct
-        metric_values = torch.stack([metrics[k] for k in metric_keys])
-        if world_size > 1:
-            dist.reduce(metric_values, dst=0)
-
-        if rank == 0:
-            metric_values = metric_values.cpu().numpy()
-            reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
-
-            # Postprocess
-            count = max(reduced_metrics.get("count", 0), 1)  # Avoid NaNs
-
-            def _normalize_metric(key: str, value: float) -> float:
-                if key.startswith("profile/"):
-                    return value / world_size
-                if key.endswith("loss"):
-                    return value / global_batch_size
-                return value / count
-
-            reduced_metrics = {f"train/{k}": _normalize_metric(k, v) for k, v in reduced_metrics.items()}
-
-            reduced_metrics["train/lr"] = lr_this_step
-            return reduced_metrics
+    return _reduce_train_metrics(metrics, global_batch_size, rank, world_size, lr_this_step)
 
 
 def evaluate(
